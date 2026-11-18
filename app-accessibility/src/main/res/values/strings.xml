@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">B站短剧刷广告(无障碍)</string>
+    <string name="service_label">B站短剧自动看广告插件</string>
+    <string name="service_description">用于在B站短剧小程序中自动检测锁定集数、观看倒计时及跳转类广告并关闭解锁。仅在用户手动点击悬浮按钮后运行，不常驻后台，不使用截屏或OCR。</string>
+</resources>

@@ -1,0 +1,22 @@
+# Gradle & build outputs
+.gradle/
+.kotlin/
+**/build/
+local.properties
+
+# IDE files
+.idea/
+*.iml
+.vscode/
+
+# Keystores & local artifacts
+*.jks
+*.keystore
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# OS files
+.DS_Store
+Thumbs.db
