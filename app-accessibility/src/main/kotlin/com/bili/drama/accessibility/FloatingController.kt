@@ -44,12 +44,16 @@ class FloatingController(
     fun show(savedPosition: Pair<Int, Int>? = null) {
         val existing = container
         if (existing != null) {
-            if (isAutoHidden) {
-                setAutoHidden(false, savedPosition)
-            } else if (existing.visibility != View.VISIBLE) {
-                existing.visibility = View.VISIBLE
+            if (!existing.isAttachedToWindow) {
+                hide()
+            } else {
+                if (isAutoHidden) {
+                    setAutoHidden(false, savedPosition)
+                } else if (existing.visibility != View.VISIBLE) {
+                    existing.visibility = View.VISIBLE
+                }
+                return
             }
-            return
         }
         val dp = context.resources.displayMetrics.density
         val touchSlop = ViewConfiguration.get(context).scaledTouchSlop.coerceAtLeast(8)
@@ -240,7 +244,8 @@ class FloatingController(
 
     fun hide() {
         val view = container ?: return
-        runCatching { windowManager.removeView(view) }
+        runCatching { windowManager.removeViewImmediate(view) }
+            .onFailure { runCatching { windowManager.removeView(view) } }
         container = null
         actionBtn = null
         statusText = null

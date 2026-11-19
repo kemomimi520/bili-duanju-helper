@@ -16,6 +16,7 @@ object AccPrefs {
     private const val KEY_POST_SEEK_WAIT = "post_seek_wait_ms_v2"
     private const val KEY_OVERLAY_ENABLED = "overlay_enabled"
     private const val KEY_ONLY_IN_BILI = "only_show_in_bili"
+    private const val KEY_SESSION_ACTIVE = "overlay_session_active"
     private const val KEY_PILL_X = "pill_pos_x"
     private const val KEY_PILL_Y = "pill_pos_y"
 
@@ -62,6 +63,13 @@ object AccPrefs {
 
     fun setOnlyShowInBili(context: Context, onlyInBili: Boolean) {
         prefs(context).edit().putBoolean(KEY_ONLY_IN_BILI, onlyInBili).apply()
+    }
+
+    fun isSessionActive(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_SESSION_ACTIVE, true)
+
+    fun setSessionActive(context: Context, active: Boolean) {
+        prefs(context).edit().putBoolean(KEY_SESSION_ACTIVE, active).commit()
     }
 
     fun loadPillPosition(context: Context): Pair<Int, Int>? {

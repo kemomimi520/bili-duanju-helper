@@ -13,6 +13,17 @@ sealed class AdClassification {
  */
 object RuleMatcher {
 
+    fun isBonusUnlockModal(snapshot: UiSnapshot): Boolean {
+        if (snapshot.packageName != BiliNodes.PKG_BILI) return false
+        val hasUnlock = snapshot.nodes.any { node ->
+            node.visible &&
+                node.enabled &&
+                node.bounds.isOnScreen(snapshot.screenWidth, snapshot.screenHeight) &&
+                BiliNodes.BONUS_UNLOCK_BUTTON_KEYWORDS.any { node.displayLabel == it || node.displayLabel.contains(it) }
+        }
+        return hasUnlock && findBonusDismissButton(snapshot) != null
+    }
+
     fun hasShortDramaStructure(snapshot: UiSnapshot): Boolean {
         if (snapshot.packageName != BiliNodes.PKG_BILI) return false
         return snapshot.firstById(BiliNodes.ID_FEED_VIDEOS) != null ||
@@ -21,7 +32,8 @@ object RuleMatcher {
             snapshot.firstLaidOutOnScreenById(BiliNodes.ID_CTRL_SEEKBAR) != null ||
             hasVisibleLockOverlay(snapshot) ||
             (snapshot.activityName.contains("AppContainerActivity") &&
-                snapshot.allTexts().any { it.contains("选集(") })
+                snapshot.allTexts().any { it.contains("选集(") }) ||
+            isBonusUnlockModal(snapshot)
     }
 
     fun isShortDramaScreen(snapshot: UiSnapshot): Boolean =

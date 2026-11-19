@@ -699,22 +699,26 @@ class DramaEngineTest {
         assertEquals(1, a1.attempt)
 
         // Back landed on OPPO Launcher instead of Bilibili -> must STILL escalate to attempt 2 (Recents), NOT pause!
-        val launcherSnap = taobaoSnap.copy(packageName = "com.oppo.launcher", timestampMs = 18000L)
+        val launcherSnap = taobaoSnap.copy(packageName = "com.oppo.launcher", timestampMs = 19000L)
         val a2 = assertIs<EngineAction.BringBiliToFront>(engine.step(launcherSnap))
         assertEquals(2, a2.attempt)
 
-        // Continue escalating up to MAX_RETURN_ATTEMPTS (6) if needed
-        val a3 = assertIs<EngineAction.BringBiliToFront>(engine.step(taobaoSnap.copy(timestampMs = 19500L)))
+        // Continue escalating up to MAX_RETURN_ATTEMPTS (8) if needed
+        val a3 = assertIs<EngineAction.BringBiliToFront>(engine.step(taobaoSnap.copy(timestampMs = 21500L)))
         assertEquals(3, a3.attempt)
-        val a4 = assertIs<EngineAction.BringBiliToFront>(engine.step(taobaoSnap.copy(timestampMs = 21000L)))
+        val a4 = assertIs<EngineAction.BringBiliToFront>(engine.step(taobaoSnap.copy(timestampMs = 24000L)))
         assertEquals(4, a4.attempt)
-        val a5 = assertIs<EngineAction.BringBiliToFront>(engine.step(taobaoSnap.copy(timestampMs = 22500L)))
+        val a5 = assertIs<EngineAction.BringBiliToFront>(engine.step(taobaoSnap.copy(timestampMs = 26500L)))
         assertEquals(5, a5.attempt)
-        val a6 = assertIs<EngineAction.BringBiliToFront>(engine.step(taobaoSnap.copy(timestampMs = 24000L)))
+        val a6 = assertIs<EngineAction.BringBiliToFront>(engine.step(taobaoSnap.copy(timestampMs = 29000L)))
         assertEquals(6, a6.attempt)
+        val a7 = assertIs<EngineAction.BringBiliToFront>(engine.step(taobaoSnap.copy(timestampMs = 31500L)))
+        assertEquals(7, a7.attempt)
+        val a8 = assertIs<EngineAction.BringBiliToFront>(engine.step(taobaoSnap.copy(timestampMs = 34000L)))
+        assertEquals(8, a8.attempt)
 
-        // After attempt 6 fails, pauses calmly without giving up, and resumes once user/system returns to Bilibili
-        val manualPrompt = assertIs<EngineAction.Wait>(engine.step(taobaoSnap.copy(timestampMs = 25500L)))
+        // After attempt 8 fails, pauses calmly without giving up, and resumes once user/system returns to Bilibili
+        val manualPrompt = assertIs<EngineAction.Wait>(engine.step(taobaoSnap.copy(timestampMs = 36500L)))
         assertTrue(manualPrompt.status.contains("请手动切回B站"))
 
         val rewardedSnap = UiSnapshot(
@@ -726,7 +730,7 @@ class DramaEngineTest {
                 node(id = BiliNodes.ID_TV_COUNTDOWN, text = "已获得奖励"),
                 node(id = BiliNodes.ID_TV_CLOSE, text = "关闭")
             ),
-            timestampMs = 27000L
+            timestampMs = 38000L
         )
         val closeAction = assertIs<EngineAction.ClickNode>(engine.step(rewardedSnap))
         assertEquals(BiliNodes.ID_TV_CLOSE, closeAction.node.viewId)
@@ -830,7 +834,7 @@ class DramaEngineTest {
             screenWidth = 1440,
             screenHeight = 3120,
             nodes = emptyList(),
-            timestampMs = 18000L
+            timestampMs = 19000L
         )
         val switchAction = assertIs<EngineAction.BringBiliToFront>(engine.step(biliMainSnap))
         assertEquals(2, switchAction.attempt)
@@ -1070,5 +1074,225 @@ class DramaEngineTest {
         assertIs<EngineAction.Wait>(engine.step(emptySameContainer))
         // Even 5s later while still inside AppContainerActivity0, never press Back to exit the drama mini-program
         assertIs<EngineAction.Wait>(engine.step(emptySameContainer.copy(timestampMs = 8550L)))
+    }
+
+    @Test
+    fun `waits 2200ms between BringBiliToFront attempts so Recents zoom never races with Back`() {
+        val engine = DramaStateEngine(DramaConfig(externalStaySeconds = 11))
+        engine.start(1000L)
+
+        val jumpModalSnap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = BiliNodes.ACTIVITY_REWARD_AD,
+            screenWidth = 1440,
+            screenHeight = 3200,
+            nodes = listOf(
+                node(text = "前往10秒即可获得奖励", clickable = false),
+                node(text = "立即购买", clickable = true)
+            ),
+            timestampMs = 2000L
+        )
+        assertIs<EngineAction.ClickNode>(engine.step(jumpModalSnap))
+
+        val taobaoSnap = UiSnapshot("com.taobao.taobao", "TTDetailActivity", 1440, 3200, emptyList(), 3000L)
+        assertIs<EngineAction.Wait>(engine.step(taobaoSnap))
+
+        val a1 = assertIs<EngineAction.BringBiliToFront>(engine.step(taobaoSnap.copy(timestampMs = 14500L)))
+        assertEquals(1, a1.attempt)
+
+        // At +1500ms (inside Recents animation window), must Wait rather than escalating prematurely!
+        assertIs<EngineAction.Wait>(engine.step(taobaoSnap.copy(timestampMs = 16000L)))
+
+        // After 2200ms (+2300ms), escalates cleanly to attempt 2
+        val a2 = assertIs<EngineAction.BringBiliToFront>(engine.step(taobaoSnap.copy(timestampMs = 16800L)))
+        assertEquals(2, a2.attempt)
+    }
+
+    @Test
+    fun `closes AdWebActivity quickly after returning from external jump to uncover RewardAdActivityWeb`() {
+        val engine = DramaStateEngine(DramaConfig(externalStaySeconds = 11))
+        engine.start(1000L)
+
+        val jumpModalSnap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = BiliNodes.ACTIVITY_REWARD_AD,
+            screenWidth = 1440,
+            screenHeight = 3200,
+            nodes = listOf(
+                node(text = "前往10秒即可获得奖励", clickable = false),
+                node(text = "立即购买", clickable = true)
+            ),
+            timestampMs = 2000L
+        )
+        assertIs<EngineAction.ClickNode>(engine.step(jumpModalSnap))
+
+        val taobaoSnap = UiSnapshot("com.taobao.taobao", "TTDetailActivity", 1440, 3200, emptyList(), 3000L)
+        assertIs<EngineAction.Wait>(engine.step(taobaoSnap))
+        assertIs<EngineAction.BringBiliToFront>(engine.step(taobaoSnap.copy(timestampMs = 14500L)))
+
+        // Returned into Bilibili task where AdWebActivity sits above RewardAdActivityWeb
+        val adWebSnap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = "com.bilibili.ad.web.AdWebActivity",
+            screenWidth = 1440,
+            screenHeight = 3200,
+            nodes = emptyList(),
+            timestampMs = 15200L
+        )
+        val backAct = assertIs<EngineAction.PressBack>(engine.step(adWebSnap))
+        assertTrue(backAct.reason.contains("广告落地页/中转页"))
+
+        // RewardAdActivityWeb is now uncovered and awarded
+        val rewardedSnap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = BiliNodes.ACTIVITY_REWARD_AD,
+            screenWidth = 1440,
+            screenHeight = 3200,
+            nodes = listOf(
+                node(id = BiliNodes.ID_TV_COUNTDOWN, text = "已获得奖励"),
+                node(id = BiliNodes.ID_TV_CLOSE, text = "关闭")
+            ),
+            timestampMs = 16000L
+        )
+        val closeAct = assertIs<EngineAction.ClickNode>(engine.step(rewardedSnap))
+        assertEquals(BiliNodes.ID_TV_CLOSE, closeAct.node.viewId)
+    }
+
+    @Test
+    fun `handles Compose 点击按钮即可获得奖励 modal with 前往京东 and 放弃机会 as ExternalJumpTask`() {
+        val snap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = BiliNodes.ACTIVITY_REWARD_AD,
+            screenWidth = 1440,
+            screenHeight = 3200,
+            nodes = listOf(
+                node(text = "点击按钮即可获得奖励", bounds = RectBounds(271, 1411, 1171, 1530), clickable = false),
+                node(text = "", bounds = RectBounds(288, 1613, 1153, 1801), clickable = true),
+                node(text = "前往京东", bounds = RectBounds(601, 1667, 841, 1748), clickable = false),
+                node(text = "放弃机会", bounds = RectBounds(288, 1809, 1153, 1989), clickable = true)
+            ),
+            timestampMs = 2000L
+        )
+        val classified = RuleMatcher.classifyAd(snap)
+        val jumpTask = assertIs<AdClassification.ExternalJumpTask>(classified)
+        assertEquals("前往京东", jumpTask.actionNode.displayLabel)
+
+        val engine = DramaStateEngine()
+        engine.start(1000L)
+        val action = assertIs<EngineAction.ClickNode>(engine.step(snap))
+        assertEquals("前往京东", action.node.displayLabel)
+        assertEquals(EnginePhase.EXTERNAL_APP_STAY, engine.phase)
+    }
+
+    @Test
+    fun `recognizes standalone WebView bonus modal as short-drama screen and dismisses immediately on last episode`() {
+        val engine = DramaStateEngine()
+        engine.start(1000L)
+
+        // First observe last episode (17/17) and enter a reward ad
+        val ep17Snap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = "${BiliNodes.ACTIVITY_APP_CONTAINER_PREFIX}0",
+            screenWidth = 1440,
+            screenHeight = 3200,
+            nodes = listOf(
+                node(id = BiliNodes.ID_ALBUM_SELECT_TEXT, text = "全集 · 选集(17/17)"),
+                node(id = BiliNodes.ID_BTN_UNLOCK, text = "看广告解锁")
+            ),
+            timestampMs = 1500L
+        )
+        assertIs<EngineAction.ClickNode>(engine.step(ep17Snap))
+
+        val adSnap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = BiliNodes.ACTIVITY_REWARD_AD,
+            screenWidth = 1440,
+            screenHeight = 3200,
+            nodes = listOf(
+                node(id = BiliNodes.ID_TV_COUNTDOWN, text = "已获得奖励"),
+                node(id = BiliNodes.ID_TV_CLOSE, text = "关闭")
+            ),
+            timestampMs = 2500L
+        )
+        assertIs<EngineAction.ClickNode>(engine.step(adSnap))
+
+        // Standalone WebView bonus modal without native ID_FEED_VIDEOS / ID_ALBUM_SELECT_TEXT / SeekBar
+        val standaloneBonusSnap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = "${BiliNodes.ACTIVITY_APP_CONTAINER_PREFIX}0",
+            screenWidth = 1440,
+            screenHeight = 3200,
+            nodes = listOf(
+                node(text = "再看一个激励视频，额外赠送", bounds = RectBounds(267, 1395, 1161, 1485), clickable = false),
+                node(text = "1", bounds = RectBounds(663, 1494, 714, 1674), clickable = false),
+                node(text = "集", bounds = RectBounds(720, 1569, 777, 1653), clickable = false),
+                node(text = "观看领奖励", bounds = RectBounds(351, 1713, 1089, 1863), clickable = false),
+                node(text = "放弃福利", bounds = RectBounds(633, 1908, 807, 1971), clickable = false)
+            ),
+            timestampMs = 4000L
+        )
+        assertTrue(RuleMatcher.hasShortDramaStructure(standaloneBonusSnap))
+        // Step 1: exits WATCHING_AD -> POST_AD_SETTLE
+        assertIs<EngineAction.Wait>(engine.step(standaloneBonusSnap))
+        // Step 2: after postAdSettleMs, since already on last episode 17/17, immediately dismisses "放弃福利"
+        val dismiss = assertIs<EngineAction.ClickNode>(engine.step(standaloneBonusSnap.copy(timestampMs = 5500L)))
+        assertEquals("放弃福利", dismiss.node.displayLabel)
+    }
+
+    @Test
+    fun `never presses Back on MainActivityV2 when returning attempts are exhausted`() {
+        val engine = DramaStateEngine(DramaConfig(externalStaySeconds = 11))
+        engine.start(1000L)
+
+        val dramaSnap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = "${BiliNodes.ACTIVITY_APP_CONTAINER_PREFIX}0",
+            screenWidth = 1440,
+            screenHeight = 3200,
+            nodes = listOf(
+                node(id = BiliNodes.ID_ALBUM_SELECT_TEXT, text = "全集 · 选集(5/20)"),
+                node(id = BiliNodes.ID_BTN_UNLOCK, text = "看广告解锁")
+            ),
+            timestampMs = 1500L
+        )
+        assertIs<EngineAction.ClickNode>(engine.step(dramaSnap))
+
+        val jumpAd = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = BiliNodes.ACTIVITY_REWARD_AD,
+            screenWidth = 1440,
+            screenHeight = 3200,
+            nodes = listOf(
+                node(text = "前往10秒即可获得奖励", clickable = false),
+                node(text = "立即购买", clickable = true)
+            ),
+            timestampMs = 2500L
+        )
+        assertIs<EngineAction.ClickNode>(engine.step(jumpAd))
+
+        val taobaoSnap = UiSnapshot("com.taobao.taobao", "TMSActivity", 1440, 3200, emptyList(), 3500L)
+        assertIs<EngineAction.Wait>(engine.step(taobaoSnap))
+        var ts = 15000L
+        assertIs<EngineAction.BringBiliToFront>(engine.step(taobaoSnap.copy(timestampMs = ts))) // attempt 1
+        while (true) {
+            ts += 2400L
+            val act = engine.step(taobaoSnap.copy(timestampMs = ts))
+            if (act is EngineAction.Wait && act.status.contains("未能自动拉回B站")) {
+                break
+            }
+        }
+
+        // Now returnToBiliAttempts == MAX_RETURN_ATTEMPTS and Intent landed on MainActivityV2:
+        // Must NEVER press Back back into Taobao!
+        val mainSnap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = "tv.danmaku.bili.MainActivityV2",
+            screenWidth = 1440,
+            screenHeight = 3200,
+            nodes = emptyList(),
+            timestampMs = ts + 3000L
+        )
+        val actOnMain = assertIs<EngineAction.Wait>(engine.step(mainSnap))
+        assertTrue(actOnMain.status.contains("已切回B站主界面"))
     }
 }

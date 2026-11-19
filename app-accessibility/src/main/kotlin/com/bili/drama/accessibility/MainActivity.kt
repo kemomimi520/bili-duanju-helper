@@ -41,6 +41,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AccPrefs.setSessionActive(this, true)
+        DramaAccessibilityService.instance?.onAppOpened()
 
         val dp = resources.displayMetrics.density
         val pad = (16 * dp).toInt()
@@ -83,15 +85,16 @@ class MainActivity : AppCompatActivity() {
         root.addView(btnOpenAppInfo)
 
         val btnLaunchBili = Button(this).apply {
-            text = "2. 打开哔哩哔哩（进入短剧后点悬浮胶囊开始）"
+            text = "2. 打开哔哩哔哩（进入短剧后点悬浮胶囊；划掉本应用即自动关窗）"
             setOnClickListener {
                 val launch = packageManager.getLaunchIntentForPackage(BiliNodes.PKG_BILI)
                 if (launch != null) {
+                    AccPrefs.setSessionActive(this@MainActivity, true)
                     AccPrefs.setOverlayEnabled(this@MainActivity, true)
                     syncingOverlaySwitch = true
                     overlaySwitch.isChecked = true
                     syncingOverlaySwitch = false
-                    DramaAccessibilityService.instance?.refreshOverlayVisibility()
+                    DramaAccessibilityService.instance?.onAppOpened()
                     startActivity(launch)
                 } else {
                     Toast.makeText(this@MainActivity, "未找到哔哩哔哩", Toast.LENGTH_SHORT).show()
@@ -214,6 +217,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        AccPrefs.setSessionActive(this, true)
+        DramaAccessibilityService.instance?.onAppOpened()
         handler.post(refreshRunnable)
     }
 

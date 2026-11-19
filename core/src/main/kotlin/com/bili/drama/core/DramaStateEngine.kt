@@ -34,7 +34,7 @@ class DramaStateEngine(
     private var config: DramaConfig = DramaConfig()
 ) {
     companion object {
-        const val MAX_RETURN_ATTEMPTS = 6
+        const val MAX_RETURN_ATTEMPTS = 8
     }
 
     var phase: EnginePhase = EnginePhase.IDLE
@@ -245,7 +245,7 @@ class DramaStateEngine(
                     }
                     return EngineAction.Wait(350L, "正在返回B站...")
                 }
-                if (now - lastActionAtMs > 1100L) {
+                if (now - lastActionAtMs > 2200L) {
                     returnToBiliAttempts += 1
                     lastActionAtMs = now
                     return EngineAction.BringBiliToFront(
@@ -485,7 +485,9 @@ class DramaStateEngine(
             }
             val curNum = lastEpisode?.current ?: -1
             val bonusDismiss = RuleMatcher.findBonusDismissButton(snapshot)
-            if (bonusDismiss != null && curNum == lastUnlockEpisodeNum && sameEpisodeUnlockAttempts >= 2) {
+            if (bonusDismiss != null &&
+                (lastEpisode?.isLastEpisode == true || (curNum == lastUnlockEpisodeNum && sameEpisodeUnlockAttempts >= 2))
+            ) {
                 sameEpisodeUnlockAttempts = 0
                 lastActionAtMs = now
                 episodeEnteredAtMs = now
@@ -662,22 +664,39 @@ class DramaStateEngine(
             return EngineAction.Wait(450L, "切集过渡加载中...")
         }
 
+        val isAdLandingOrCallUp = snapshot.activityName.contains("AdWebActivity") ||
+            snapshot.activityName.contains("AdCallUp") ||
+            snapshot.activityName.contains("CallUpProxy")
+
+        if (phase == EnginePhase.RETURNING_TO_BILI && isAdLandingOrCallUp) {
+            if (now - lastActionAtMs > 550L) {
+                lastActionAtMs = now
+                RuleMatcher.findInAppModalCloseButton(snapshot)?.let { closeBtn ->
+                    return EngineAction.ClickNode(closeBtn, "关闭广告落地页/中转页弹窗，返回广告领奖")
+                }
+                return EngineAction.PressBack("关闭广告落地页/中转页，返回广告领奖")
+            }
+            return EngineAction.Wait(350L, "正在关闭广告中转页...")
+        }
+
         // If we returned to Bilibili's main activity after launcher fallback instead of AppContainer/RewardAd,
         // try switching back to the drama task window once before falling back to PressBack
         if (phase == EnginePhase.RETURNING_TO_BILI &&
-            snapshot.activityName.contains("MainActivity") &&
-            dramaContainerActivity.isNotBlank() &&
-            returnToBiliAttempts < MAX_RETURN_ATTEMPTS
+            snapshot.activityName.contains("MainActivity")
         ) {
-            if (now - lastActionAtMs > 1000L) {
-                returnToBiliAttempts += 1
-                lastActionAtMs = now
-                return EngineAction.BringBiliToFront(
-                    reason = "尝试切回短剧任务窗口(第${returnToBiliAttempts}次)",
-                    attempt = returnToBiliAttempts
-                )
+            if (dramaContainerActivity.isNotBlank() && returnToBiliAttempts < MAX_RETURN_ATTEMPTS) {
+                if (now - lastActionAtMs > 2200L) {
+                    returnToBiliAttempts += 1
+                    lastActionAtMs = now
+                    return EngineAction.BringBiliToFront(
+                        reason = "尝试切回短剧任务窗口(第${returnToBiliAttempts}次)",
+                        attempt = returnToBiliAttempts
+                    )
+                }
+                return EngineAction.Wait(400L, "等待切回短剧窗口...")
             }
-            return EngineAction.Wait(400L, "等待切回短剧窗口...")
+            // Never press Back on MainActivityV2 when returning, which pops right back into Taobao/external app
+            return EngineAction.Wait(1000L, "已切回B站主界面，等待切回短剧窗口")
         }
 
         if (unexpectedEnteredAtMs == 0L) {
