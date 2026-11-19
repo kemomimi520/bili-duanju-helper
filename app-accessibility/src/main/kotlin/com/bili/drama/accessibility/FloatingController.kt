@@ -33,15 +33,20 @@ class FloatingController(
     private var statusText: TextView? = null
     private var closeBtn: TextView? = null
     private var layoutParams: WindowManager.LayoutParams? = null
+    private var isAutoHidden = false
+    private var lastShownX = 0
+    private var lastShownY = 0
 
     val isShowing: Boolean
-        get() = container != null
+        get() = container != null && !isAutoHidden
 
     @SuppressLint("ClickableViewAccessibility")
     fun show(savedPosition: Pair<Int, Int>? = null) {
         val existing = container
         if (existing != null) {
-            if (existing.visibility != View.VISIBLE) {
+            if (isAutoHidden) {
+                setAutoHidden(false, savedPosition)
+            } else if (existing.visibility != View.VISIBLE) {
                 existing.visibility = View.VISIBLE
             }
             return
@@ -185,9 +190,52 @@ class FloatingController(
             statusText = status
             closeBtn = close
             layoutParams = params
+            isAutoHidden = false
+            lastShownX = params.x
+            lastShownY = params.y
         }.onFailure {
             android.util.Log.w("BiliDramaAcc", "Floating addView failed: ${it.message}", it)
         }
+    }
+
+    /**
+     * Temporarily collapses the overlay to an invisible, non-touchable 1x1 pixel when outside Bilibili
+     * while the user keeps the overlay switch enabled. This prevents aggressive OEM background freezers
+     * (HyperOS SmartPower/Millet, ColorOS Hans, OriginOS Tombstone) from freezing the AccessibilityService
+     * and missing the return to Bilibili. Explicit close ('✕') or disabling calls hide() to removeView completely.
+     */
+    fun setAutoHidden(hidden: Boolean, savedPosition: Pair<Int, Int>? = null) {
+        val root = container ?: return
+        val params = layoutParams ?: return
+        if (hidden == isAutoHidden) return
+        isAutoHidden = hidden
+        if (hidden) {
+            lastShownX = params.x
+            lastShownY = params.y
+            root.alpha = 0f
+            for (i in 0 until root.childCount) {
+                root.getChildAt(i).visibility = View.GONE
+            }
+            params.width = 1
+            params.height = 1
+            params.x = 0
+            params.y = 0
+            params.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+        } else {
+            for (i in 0 until root.childCount) {
+                root.getChildAt(i).visibility = View.VISIBLE
+            }
+            root.alpha = 1f
+            params.width = WindowManager.LayoutParams.WRAP_CONTENT
+            params.height = WindowManager.LayoutParams.WRAP_CONTENT
+            params.x = savedPosition?.first ?: lastShownX
+            params.y = savedPosition?.second ?: lastShownY
+            params.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+        }
+        runCatching { windowManager.updateViewLayout(root, params) }
     }
 
     fun hide() {
@@ -198,6 +246,7 @@ class FloatingController(
         statusText = null
         closeBtn = null
         layoutParams = null
+        isAutoHidden = false
     }
 
     fun setVisible(visible: Boolean) {

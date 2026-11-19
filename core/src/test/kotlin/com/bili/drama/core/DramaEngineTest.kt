@@ -835,4 +835,145 @@ class DramaEngineTest {
         val switchAction = assertIs<EngineAction.BringBiliToFront>(engine.step(biliMainSnap))
         assertEquals(2, switchAction.attempt)
     }
+
+    @Test
+    fun `does not prematurely close ad when swipe guide appears during active countdown`() {
+        val snap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = BiliNodes.ACTIVITY_REWARD_AD,
+            screenWidth = 1440,
+            screenHeight = 3200,
+            nodes = listOf(
+                node(id = BiliNodes.ID_TV_COUNTDOWN, text = "8秒后可获得奖励"),
+                node(id = BiliNodes.ID_TV_CLOSE, text = "关闭"),
+                node(text = "上滑继续观看剧集")
+            ),
+            timestampMs = 3000L
+        )
+        val result = RuleMatcher.classifyAd(snap)
+        assertIs<AdClassification.Waiting>(result)
+    }
+
+    @Test
+    fun `closes ad via swipe or close button only after countdown flips to 已获得奖励`() {
+        val snap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = BiliNodes.ACTIVITY_REWARD_AD,
+            screenWidth = 1440,
+            screenHeight = 3200,
+            nodes = listOf(
+                node(id = BiliNodes.ID_TV_COUNTDOWN, text = "已获得奖励"),
+                node(id = BiliNodes.ID_TV_CLOSE, text = "关闭"),
+                node(text = "上滑继续观看剧集")
+            ),
+            timestampMs = 15000L
+        )
+        val result = assertIs<AdClassification.Rewarded>(RuleMatcher.classifyAd(snap))
+        assertEquals(BiliNodes.ID_TV_CLOSE, result.closeNode?.viewId)
+        assertTrue(result.hasSwipeGuide)
+    }
+
+    @Test
+    fun `retention dialog imposes cooldown and prevents infinite close loop`() {
+        val engine = DramaStateEngine()
+        engine.start(1000L)
+
+        // Suppose body text falsely matched REWARD_DONE_KEYWORDS without tv_countdown present
+        val fakeRewardSnap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = BiliNodes.ACTIVITY_REWARD_AD,
+            screenWidth = 1440,
+            screenHeight = 3200,
+            nodes = listOf(
+                node(text = "已解锁下集"),
+                node(id = BiliNodes.ID_TV_CLOSE, text = "关闭")
+            ),
+            timestampMs = 2000L
+        )
+        assertIs<EngineAction.ClickNode>(engine.step(fakeRewardSnap))
+        assertEquals(1, engine.adsCompletedCount)
+
+        // Bilibili pops retention dialog -> must click continue AND roll back false reward count
+        val retentionSnap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = BiliNodes.ACTIVITY_REWARD_AD,
+            screenWidth = 1440,
+            screenHeight = 3200,
+            nodes = listOf(
+                node(text = "放弃机会"),
+                node(text = "继续观看领取奖励")
+            ),
+            timestampMs = 3000L
+        )
+        val clickContinue = assertIs<EngineAction.ClickNode>(engine.step(retentionSnap))
+        assertEquals("继续观看领取奖励", clickContinue.node.text)
+        assertEquals(0, engine.adsCompletedCount)
+
+        // 1s later, same body text without explicit tv_countdown reward -> MUST wait during cooldown
+        val afterContinue = assertIs<EngineAction.Wait>(engine.step(fakeRewardSnap.copy(timestampMs = 4000L)))
+        assertTrue(afterContinue.status.contains("继续观看"))
+
+        // Once tv_countdown explicitly shows 已获得奖励 -> closes immediately even during cooldown
+        val trueRewardSnap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = BiliNodes.ACTIVITY_REWARD_AD,
+            screenWidth = 1440,
+            screenHeight = 3200,
+            nodes = listOf(
+                node(id = BiliNodes.ID_TV_COUNTDOWN, text = "已获得奖励"),
+                node(id = BiliNodes.ID_TV_CLOSE, text = "关闭")
+            ),
+            timestampMs = 4500L
+        )
+        val closeAction = assertIs<EngineAction.ClickNode>(engine.step(trueRewardSnap))
+        assertEquals(BiliNodes.ID_TV_CLOSE, closeAction.node.viewId)
+    }
+
+    @Test
+    fun `pulls back immediately from privacy-protected external app during ad`() {
+        val engine = DramaStateEngine(DramaConfig(interceptExternalJumps = true))
+        engine.start(1000L)
+
+        val adSnap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = BiliNodes.ACTIVITY_REWARD_AD,
+            screenWidth = 1440,
+            screenHeight = 3200,
+            nodes = listOf(node(id = BiliNodes.ID_TV_COUNTDOWN, text = "10秒后可获得奖励")),
+            timestampMs = 2000L
+        )
+        assertIs<EngineAction.Wait>(engine.step(adSnap))
+
+        // Privacy-protected external app (e.g. HyperOS/ColorOS/OriginOS hides Accessibility window)
+        val protectedSnap = UiSnapshot(
+            packageName = BiliNodes.PKG_EXTERNAL_PROTECTED,
+            activityName = "",
+            screenWidth = 1440,
+            screenHeight = 3200,
+            nodes = emptyList(),
+            timestampMs = 3500L
+        )
+        val pullAction = assertIs<EngineAction.BringBiliToFront>(engine.step(protectedSnap))
+        assertEquals(1, pullAction.attempt)
+    }
+
+    @Test
+    fun `does not click ad CTA button on normal video countdown ad with 8秒后可获得奖励`() {
+        val snap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = BiliNodes.ACTIVITY_REWARD_AD,
+            screenWidth = 1440,
+            screenHeight = 3200,
+            nodes = listOf(
+                node(id = BiliNodes.ID_TV_COUNTDOWN, text = "8秒后可获得奖励"),
+                node(id = BiliNodes.ID_TV_CLOSE, text = "关闭"),
+                node(text = "【热播漫剧】一口气连看300集的漫剧..."),
+                node(text = "去看看"),
+                node(text = "立即购买")
+            ),
+            timestampMs = 3000L
+        )
+        val result = assertIs<AdClassification.Waiting>(RuleMatcher.classifyAd(snap))
+        assertEquals("8秒后可获得奖励", result.statusText)
+    }
 }

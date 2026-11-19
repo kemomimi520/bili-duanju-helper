@@ -16,6 +16,11 @@ object NodeScanner {
 
     private const val SELF_PKG = "com.bili.drama.accessibility"
     private const val SYSTEM_UI_PKG = "com.android.systemui"
+    private val IGNORED_OVERLAY_PKGS = setOf(
+        SELF_PKG,
+        SYSTEM_UI_PKG,
+        "miui.systemui.plugin"
+    )
 
     data class ScanResult(
         val snapshot: UiSnapshot,
@@ -27,22 +32,28 @@ object NodeScanner {
         activeRoot: AccessibilityNodeInfo?,
         screenWidth: Int,
         screenHeight: Int,
-        lastActivityName: String
+        lastActivityName: String,
+        fallbackExternalPkg: String = ""
     ): ScanResult {
         val uiNodes = mutableListOf<UiNode>()
         val nodeRefs = HashMap<String, AccessibilityNodeInfo>()
         var seq = 0
 
-        // Sort windows by focus -> active -> layer so top foreground window/dialog determines pkg accurately
+        // Only consider real TYPE_APPLICATION windows plus active OEM/system jump confirmation dialogs.
+        // Never allow persistent TYPE_SYSTEM overlays (OEM gesture stubs, sidebars, dynamic islands,
+        // status/nav bars) to override the foreground app package or pollute the node tree.
         val candidateWins = windows.asSequence()
-            .filter {
-                it.type != AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY &&
-                    it.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD
+            .filter { win ->
+                win.type == AccessibilityWindowInfo.TYPE_APPLICATION ||
+                    win.type == AccessibilityWindowInfo.TYPE_SYSTEM
             }
             .mapNotNull { win ->
                 val r = win.root ?: return@mapNotNull null
                 val rPkg = r.packageName?.toString().orEmpty()
-                if (rPkg == SELF_PKG) return@mapNotNull null
+                if (rPkg.isBlank() || rPkg in IGNORED_OVERLAY_PKGS) return@mapNotNull null
+                if (win.type == AccessibilityWindowInfo.TYPE_SYSTEM && rPkg !in BiliNodes.SYSTEM_CONFIRM_PACKAGES) {
+                    return@mapNotNull null
+                }
                 Triple(win, r, rPkg)
             }
             .sortedWith(
@@ -53,38 +64,38 @@ object NodeScanner {
             .toList()
 
         // Prefer active system/OEM dialog package if it matches SYSTEM_CONFIRM_PACKAGES,
-        // else topmost TYPE_APPLICATION window, avoiding transient systemui/self override.
+        // else topmost TYPE_APPLICATION window.
         var pkg = candidateWins.firstOrNull { (win, _, rPkg) ->
             rPkg in BiliNodes.SYSTEM_CONFIRM_PACKAGES && (win.isFocused || win.isActive)
         }?.third.orEmpty()
 
         if (pkg.isBlank()) {
             pkg = candidateWins.firstOrNull { (win, _, rPkg) ->
-                rPkg.isNotBlank() &&
-                    rPkg != SYSTEM_UI_PKG &&
-                    win.type == AccessibilityWindowInfo.TYPE_APPLICATION
+                rPkg.isNotBlank() && win.type == AccessibilityWindowInfo.TYPE_APPLICATION
             }?.third.orEmpty()
         }
 
         if (pkg.isBlank()) {
             val activePkg = activeRoot?.packageName?.toString().orEmpty()
             pkg = when {
-                activePkg.isNotBlank() && activePkg != SELF_PKG && activePkg != SYSTEM_UI_PKG -> activePkg
-                else -> candidateWins.firstOrNull { it.third.isNotBlank() }?.third.orEmpty().ifBlank { activePkg }
+                activePkg.isNotBlank() && activePkg !in IGNORED_OVERLAY_PKGS -> activePkg
+                // No TYPE_APPLICATION window and no activeRoot means the foreground external app is
+                // hidden by Android/OEM privacy protection (not Home, which is always TYPE_APPLICATION).
+                fallbackExternalPkg.isNotBlank() && fallbackExternalPkg != BiliNodes.PKG_BILI -> fallbackExternalPkg
+                else -> BiliNodes.PKG_EXTERNAL_PROTECTED
             }
         }
 
         val roots = mutableListOf<AccessibilityNodeInfo>()
         for ((_, root, rootPkg) in candidateWins) {
-            if (rootPkg == SYSTEM_UI_PKG || rootPkg == SELF_PKG) continue
+            if (rootPkg in IGNORED_OVERLAY_PKGS) continue
             if (roots.none { it == root }) {
                 roots.add(root)
             }
         }
         val activePkg = activeRoot?.packageName?.toString().orEmpty()
         if (activeRoot != null &&
-            activePkg != SELF_PKG &&
-            activePkg != SYSTEM_UI_PKG &&
+            activePkg !in IGNORED_OVERLAY_PKGS &&
             roots.none { it == activeRoot }
         ) {
             roots.add(0, activeRoot)

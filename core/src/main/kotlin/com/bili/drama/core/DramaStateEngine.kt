@@ -66,6 +66,7 @@ class DramaStateEngine(
     private var lockedDramaTotal: Int? = null
     private var dramaContainerActivity: String = ""
     private var lastBufferingAtMs: Long = 0L
+    private var retentionCooldownUntilMs: Long = 0L
 
     fun updateConfig(newConfig: DramaConfig) {
         config = newConfig
@@ -92,6 +93,7 @@ class DramaStateEngine(
         lockedDramaTotal = null
         dramaContainerActivity = ""
         lastBufferingAtMs = 0L
+        retentionCooldownUntilMs = 0L
     }
 
     fun stop() {
@@ -270,6 +272,7 @@ class DramaStateEngine(
             phase = EnginePhase.WATCHING_AD
             adEnteredAtMs = now
             adClosingAtMs = 0L
+            retentionCooldownUntilMs = 0L
         }
 
         // Handle Bilibili's own in-app jump confirmation dialog ("即将离开哔哩哔哩")
@@ -309,6 +312,13 @@ class DramaStateEngine(
 
         return when (val adState = RuleMatcher.classifyAd(snapshot)) {
             is AdClassification.RetentionDialog -> {
+                // Retention dialog proves the ad has NOT finished rewarding yet: roll back any premature close state
+                if (adClosingAtMs > 0L) {
+                    adsCompletedCount = (adsCompletedCount - 1).coerceAtLeast(0)
+                    adClosingAtMs = 0L
+                    rewardEarnedSinceLastUnlockClick = false
+                }
+                retentionCooldownUntilMs = now + 4000L
                 if (now - lastActionAtMs > 800L) {
                     lastActionAtMs = now
                     EngineAction.ClickNode(adState.continueNode, "拦截挽留弹窗: ${adState.continueNode.displayLabel}")
@@ -318,6 +328,11 @@ class DramaStateEngine(
             }
 
             is AdClassification.Rewarded -> {
+                val countdownLabel = snapshot.firstById(BiliNodes.ID_TV_COUNTDOWN)?.displayLabel.orEmpty()
+                val explicitCountdownDone = BiliNodes.REWARD_DONE_KEYWORDS.any { countdownLabel.contains(it) }
+                if (now < retentionCooldownUntilMs && !explicitCountdownDone) {
+                    return EngineAction.Wait(350L, "继续观看广告等待奖励...")
+                }
                 if (adClosingAtMs == 0L) {
                     adsCompletedCount += 1
                     rewardEarnedSinceLastUnlockClick = true

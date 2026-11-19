@@ -194,6 +194,20 @@ object RuleMatcher {
     fun isEpisodeBuffering(snapshot: UiSnapshot): Boolean =
         snapshot.allTexts().any { it.startsWith("正在缓冲") }
 
+    private val ACTIVE_COUNTDOWN_REGEX = Regex("\\d+\\s*[秒sS]")
+
+    fun isActiveCountdownText(text: String): Boolean {
+        if (text.isBlank()) return false
+        if (BiliNodes.REWARD_DONE_KEYWORDS.any { text.contains(it) }) return false
+        if (BiliNodes.EXTERNAL_JUMP_PROMPT_KEYWORDS.any { text.contains(it) }) return false
+        if (!ACTIVE_COUNTDOWN_REGEX.containsMatchIn(text)) return false
+        return text.contains("秒后") ||
+            text.contains("s后", ignoreCase = true) ||
+            text.contains("还剩") ||
+            text.contains("剩余") ||
+            text.contains("倒计时")
+    }
+
     /**
      * Classifies the current state of RewardAdActivityWeb or an ad dialog.
      */
@@ -213,23 +227,37 @@ object RuleMatcher {
             }
         }
 
-        // 2. Reward completed check (prioritize tv_countdown text, then global text)
+        // 2. Reward completed check (prioritize tv_countdown text, then global text).
+        // If an active numeric countdown ("8秒后可获得奖励", "5s后领取", "还剩3秒") is still displayed,
+        // never falsely treat ad body text or bottom swipe guides as Rewarded.
         val countdownText = snapshot.firstById(BiliNodes.ID_TV_COUNTDOWN)?.displayLabel.orEmpty()
         val hasSwipeGuide = visibleTexts.any { txt ->
             BiliNodes.REWARD_SWIPE_GUIDE_KEYWORDS.any { txt.contains(it) }
         }
-        val rewardDone = BiliNodes.REWARD_DONE_KEYWORDS.any { countdownText.contains(it) } ||
-            BiliNodes.REWARD_DONE_KEYWORDS.any { joined.contains(it) }
+        val countdownExplicitlyDone = BiliNodes.REWARD_DONE_KEYWORDS.any { countdownText.contains(it) }
+        val activeCountdownVisible = !countdownExplicitlyDone && (
+            isActiveCountdownText(countdownText) ||
+                visibleTexts.any { isActiveCountdownText(it) }
+            )
+        val rewardDone = countdownExplicitlyDone ||
+            (!activeCountdownVisible && BiliNodes.REWARD_DONE_KEYWORDS.any { joined.contains(it) })
         if (rewardDone) {
             val closeNode = snapshot.firstById(BiliNodes.ID_TV_CLOSE)
                 ?: findClickableByKeywords(snapshot, BiliNodes.CLOSE_BUTTON_TEXTS)
             return AdClassification.Rewarded(closeNode = closeNode, hasSwipeGuide = hasSwipeGuide)
         }
 
-        // 3. External app experience jump task ("前往体验10秒获得奖励" / "去体验 10秒 即 可获得奖励！！")
-        val jumpPrompt = visibleTexts.firstOrNull { txt ->
+        // 3. External app experience jump task ("前往体验10秒获得奖励" / "去体验 10秒 即可获得奖励！！").
+        // Exclude ID_TV_COUNTDOWN and active countdown labels ("8秒后可获得奖励") so normal video ads
+        // with bottom CTA cards ("去看看" / "立即购买") are NEVER mistakenly clicked!
+        val nonCountdownTexts = snapshot.nodes
+            .filter { it.visible && it.viewId != BiliNodes.ID_TV_COUNTDOWN && it.displayLabel.isNotEmpty() }
+            .map { it.displayLabel }
+            .filter { !isActiveCountdownText(it) }
+        val nonCountdownCompact = nonCountdownTexts.joinToString("")
+        val jumpPrompt = nonCountdownTexts.firstOrNull { txt ->
             BiliNodes.EXTERNAL_JUMP_PROMPT_KEYWORDS.any { txt.contains(it) }
-        } ?: BiliNodes.EXTERNAL_JUMP_PROMPT_KEYWORDS.firstOrNull { compact.contains(it) }
+        } ?: BiliNodes.EXTERNAL_JUMP_PROMPT_KEYWORDS.firstOrNull { nonCountdownCompact.contains(it) }
         if (jumpPrompt != null) {
             val goNode = findExternalJumpActionNode(snapshot)
             if (goNode != null) {

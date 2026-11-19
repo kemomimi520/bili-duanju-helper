@@ -6,6 +6,8 @@ package com.bili.drama.core
  */
 object BiliNodes {
     const val PKG_BILI = "tv.danmaku.bili"
+    // Synthetic non-pause package marker when Android/OEM privacy shield hides the foreground external app's Accessibility window
+    const val PKG_EXTERNAL_PROTECTED = "external.protected.app"
 
     // Activities
     const val ACTIVITY_APP_CONTAINER_PREFIX = "com.bilibili.lib.fasthybrid.container.AppContainerActivity"
@@ -116,7 +118,9 @@ object BiliNodes {
         "残忍离开",
         "取消",
         "下载",
-        "安装"
+        "安装",
+        "刷广告",
+        "检测广告"
     )
 
     val PAID_MODAL_INDICATORS = listOf(
@@ -131,16 +135,16 @@ object BiliNodes {
         "×"
     )
 
-    // Reward ad state keywords (verified from Bilibili 9.19.0 resources)
+    // Reward ad state keywords (verified from Bilibili 9.19.0 resources).
+    // Note: "上滑继续观看剧集/短剧" can appear on the bottom card BEFORE the countdown ends,
+    // so it belongs ONLY in REWARD_SWIPE_GUIDE_KEYWORDS, never as a standalone reward-done trigger.
     val REWARD_DONE_KEYWORDS = listOf(
         "已获得奖励",
         "恭喜你已获得奖励",
         "你已获得奖励",
         "已解锁下",
         "已解锁充电时长",
-        "游戏试玩已结束",
-        "上滑继续观看短剧",
-        "上滑继续观看剧集"
+        "游戏试玩已结束"
     )
 
     val REWARD_SWIPE_GUIDE_KEYWORDS = listOf(
@@ -164,13 +168,18 @@ object BiliNodes {
         "残忍离开"
     )
 
+    // Prompts that EXPLICITLY require jumping/experiencing an ad to earn the reward.
+    // Never include bare "可获得奖励" because normal video countdowns ("8秒后可获得奖励") contain it!
     val EXTERNAL_JUMP_PROMPT_KEYWORDS = listOf(
         "前往体验",
         "去体验",
-        "即可获得奖励",
-        "可获得奖励",
         "前往获得激励",
         "点击广告即可获得奖励",
+        "点击即可获得奖励",
+        "体验10秒",
+        "体验15秒",
+        "浏览10秒",
+        "浏览15秒",
         "尚未满足体验时长"
     )
 
