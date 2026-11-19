@@ -56,6 +56,7 @@ class DramaStateEngine(
     private var adEnteredAtMs: Long = 0L
     private var externalEnteredAtMs: Long = 0L
     private var externalJumpTriggeredForAd: Boolean = false
+    private var externalJumpClickCount: Int = 0
     private var rewardEarnedSinceLastUnlockClick: Boolean = false
     private var sameEpisodeUnlockAttempts: Int = 0
     private var sameEpisodeSwipeAttempts: Int = 0
@@ -67,6 +68,7 @@ class DramaStateEngine(
     private var dramaContainerActivity: String = ""
     private var lastBufferingAtMs: Long = 0L
     private var retentionCooldownUntilMs: Long = 0L
+    private var unexpectedEnteredAtMs: Long = 0L
 
     fun updateConfig(newConfig: DramaConfig) {
         config = newConfig
@@ -81,6 +83,7 @@ class DramaStateEngine(
         adEnteredAtMs = 0L
         externalEnteredAtMs = 0L
         externalJumpTriggeredForAd = false
+        externalJumpClickCount = 0
         rewardEarnedSinceLastUnlockClick = false
         sameEpisodeUnlockAttempts = 0
         sameEpisodeSwipeAttempts = 0
@@ -94,6 +97,7 @@ class DramaStateEngine(
         dramaContainerActivity = ""
         lastBufferingAtMs = 0L
         retentionCooldownUntilMs = 0L
+        unexpectedEnteredAtMs = 0L
     }
 
     fun stop() {
@@ -109,16 +113,19 @@ class DramaStateEngine(
 
         // 1. Handle external app screen (outside Bilibili)
         if (snapshot.packageName != BiliNodes.PKG_BILI) {
+            unexpectedEnteredAtMs = 0L
             return handleOutsideBilibili(snapshot, now)
         }
 
         // 4. Inside Bilibili: Reward Ad screen
         if (RuleMatcher.isRewardAdScreen(snapshot)) {
+            unexpectedEnteredAtMs = 0L
             return handleRewardAdScreen(snapshot, now)
         }
 
         // 4.5 Inside Bilibili: Handle in-app "即将离开哔哩哔哩" dialog even before RewardAdActivity attaches
         if (RuleMatcher.isJumpConfirmationDialog(snapshot)) {
+            unexpectedEnteredAtMs = 0L
             val shouldBlock = RuleMatcher.isDownloadOrInstallPrompt(snapshot) ||
                 phase == EnginePhase.RETURNING_TO_BILI ||
                 (config.interceptExternalJumps && !externalJumpTriggeredForAd)
@@ -143,6 +150,7 @@ class DramaStateEngine(
 
         // 5. Inside Bilibili: Short-drama container screen
         if (RuleMatcher.isShortDramaScreen(snapshot)) {
+            unexpectedEnteredAtMs = 0L
             return handleShortDramaScreen(snapshot, now)
         }
 
@@ -182,8 +190,14 @@ class DramaStateEngine(
             }
         }
 
-        // 2. Always reject app store / APK installer redirects immediately
-        if (pkg in BiliNodes.APP_STORE_AND_INSTALLER_PACKAGES) {
+        // 2. Always reject APK installers immediately; reject App Stores immediately when unsolicited.
+        // During an intentional ExternalJumpTask (when target 3rd-party app isn't installed and Android opens Store),
+        // passively wait out externalStaySeconds without clicking install/download, then pull back to claim reward.
+        val isApkInstaller = pkg in BiliNodes.APK_INSTALLER_PACKAGES
+        val isUnsolicitedStore = pkg in BiliNodes.APP_STORE_AND_INSTALLER_PACKAGES &&
+            !externalJumpTriggeredForAd &&
+            phase != EnginePhase.EXTERNAL_APP_STAY
+        if (isApkInstaller || isUnsolicitedStore) {
             phase = EnginePhase.RETURNING_TO_BILI
             externalJumpTriggeredForAd = false
             if (now - lastActionAtMs > 850L) {
@@ -273,6 +287,7 @@ class DramaStateEngine(
             adEnteredAtMs = now
             adClosingAtMs = 0L
             retentionCooldownUntilMs = 0L
+            externalJumpClickCount = 0
         }
 
         // Handle Bilibili's own in-app jump confirmation dialog ("即将离开哔哩哔哩")
@@ -302,9 +317,9 @@ class DramaStateEngine(
         val adElapsedSec = (now - adEnteredAtMs) / 1000L
         if (adElapsedSec > config.adTimeoutSeconds && now - lastActionAtMs > 2000L) {
             lastActionAtMs = now
-            val closeNode = snapshot.firstById(BiliNodes.ID_TV_CLOSE)
+            val closeNode = RuleMatcher.findTimeoutDismissButton(snapshot)
             return if (closeNode != null) {
-                EngineAction.ClickNode(closeNode, "广告超时(${adElapsedSec}s)，尝试关闭")
+                EngineAction.ClickNode(closeNode, "广告超时(${adElapsedSec}s)，尝试关闭(${closeNode.displayLabel})")
             } else {
                 EngineAction.PressBack("广告超时(${adElapsedSec}s)，尝试返回")
             }
@@ -354,8 +369,12 @@ class DramaStateEngine(
             }
 
             is AdClassification.ExternalJumpTask -> {
-                if (!externalJumpTriggeredForAd && now - lastActionAtMs > 800L) {
+                val canRetryClick = externalJumpTriggeredForAd &&
+                    externalJumpClickCount < 3 &&
+                    now - lastActionAtMs > 4500L
+                if ((!externalJumpTriggeredForAd && now - lastActionAtMs > 800L) || canRetryClick) {
                     externalJumpTriggeredForAd = true
+                    externalJumpClickCount += 1
                     lastActionAtMs = now
                     phase = EnginePhase.EXTERNAL_APP_STAY
                     externalEnteredAtMs = 0L
@@ -638,6 +657,11 @@ class DramaStateEngine(
             return EngineAction.Wait(500L, "页面跳转中...")
         }
 
+        // Wait calmly right after swiping episodes so transient ViewPager2/ad-loading frames never trigger Back
+        if (lastSwipeAtMs > 0L && now - lastSwipeAtMs < 3500L) {
+            return EngineAction.Wait(450L, "切集过渡加载中...")
+        }
+
         // If we returned to Bilibili's main activity after launcher fallback instead of AppContainer/RewardAd,
         // try switching back to the drama task window once before falling back to PressBack
         if (phase == EnginePhase.RETURNING_TO_BILI &&
@@ -656,8 +680,26 @@ class DramaStateEngine(
             return EngineAction.Wait(400L, "等待切回短剧窗口...")
         }
 
+        if (unexpectedEnteredAtMs == 0L) {
+            unexpectedEnteredAtMs = now
+        }
+
         val backDelay = if (config.interceptExternalJumps && phase == EnginePhase.WATCHING_AD) 900L else 1800L
-        if (now - lastActionAtMs > backDelay) {
+        val onDramaContainer = snapshot.activityName.isNotBlank() && snapshot.activityName == dramaContainerActivity
+
+        // Never press Back blindly inside the drama mini-program container on transient empty/loading frames
+        // (doing so exits the mini-program and drops the user out to Bilibili home/launcher).
+        if (onDramaContainer && phase != EnginePhase.RETURNING_TO_BILI) {
+            RuleMatcher.findInAppModalCloseButton(snapshot)?.let { modalClose ->
+                if (now - lastActionAtMs > 800L) {
+                    lastActionAtMs = now
+                    return EngineAction.ClickNode(modalClose, "关闭遮挡弹窗，恢复短剧画面")
+                }
+            }
+            return EngineAction.Wait(500L, "等待短剧画面加载...")
+        }
+
+        if (now - unexpectedEnteredAtMs >= backDelay && now - lastActionAtMs > backDelay) {
             lastActionAtMs = now
             RuleMatcher.findInAppModalCloseButton(snapshot)?.let { modalClose ->
                 return EngineAction.ClickNode(modalClose, "关闭实名阻塞弹窗，继续返回短剧")

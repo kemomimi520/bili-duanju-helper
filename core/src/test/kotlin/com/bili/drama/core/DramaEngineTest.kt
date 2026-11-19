@@ -976,4 +976,99 @@ class DramaEngineTest {
         val result = assertIs<AdClassification.Waiting>(RuleMatcher.classifyAd(snap))
         assertEquals("8秒后可获得奖励", result.statusText)
     }
+
+    @Test
+    fun `recognizes live 前往10秒即可获得奖励 modal with 立即购买 and 放弃机会 and enters external stay`() {
+        val engine = DramaStateEngine(DramaConfig(externalStaySeconds = 11))
+        engine.start(1000L)
+
+        // Exact UI hierarchy captured live on Redmi K80 Pro Episode 25
+        val jumpModalSnap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = BiliNodes.ACTIVITY_REWARD_AD,
+            screenWidth = 1440,
+            screenHeight = 3200,
+            nodes = listOf(
+                node(text = "前往10秒即可获得奖励", bounds = RectBounds(253, 1400, 1189, 1540), clickable = false),
+                node(text = "", bounds = RectBounds(288, 1623, 1153, 1811), clickable = true),
+                node(text = "立即购买", bounds = RectBounds(601, 1677, 841, 1758), clickable = false),
+                node(text = "放弃机会", bounds = RectBounds(288, 1819, 1153, 1999), clickable = true)
+            ),
+            timestampMs = 2000L
+        )
+        val clickJump = assertIs<EngineAction.ClickNode>(engine.step(jumpModalSnap))
+        assertEquals("立即购买", clickJump.node.text)
+        assertEquals(EnginePhase.EXTERNAL_APP_STAY, engine.phase)
+
+        // Lands in Taobao -> waits 11s -> pulls back to Bilibili
+        val taobaoSnap = UiSnapshot("com.taobao.taobao", "TBMainActivity", 1440, 3200, emptyList(), 3000L)
+        val stayWait = assertIs<EngineAction.Wait>(engine.step(taobaoSnap))
+        assertTrue(stayWait.status.contains("外部软件体验中"))
+
+        val returnAct = assertIs<EngineAction.BringBiliToFront>(engine.step(taobaoSnap.copy(timestampMs = 14500L)))
+        assertEquals(1, returnAct.attempt)
+    }
+
+    @Test
+    fun `passively stays 11s on store detail page when intentional ExternalJumpTask lands on app store`() {
+        val engine = DramaStateEngine(DramaConfig(externalStaySeconds = 11))
+        engine.start(1000L)
+
+        val jumpModalSnap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = BiliNodes.ACTIVITY_REWARD_AD,
+            screenWidth = 1440,
+            screenHeight = 3200,
+            nodes = listOf(
+                node(text = "前往10秒即可获得奖励", clickable = false),
+                node(text = "立即购买", clickable = false),
+                node(text = "放弃机会", clickable = true)
+            ),
+            timestampMs = 2000L
+        )
+        assertIs<EngineAction.ClickNode>(engine.step(jumpModalSnap))
+
+        // Target app not installed -> Android opened App Store -> passively stay 11s without clicking install
+        val storeSnap = UiSnapshot("com.xiaomi.market", "MarketDetailActivity", 1440, 3200, emptyList(), 3000L)
+        val stayWait = assertIs<EngineAction.Wait>(engine.step(storeSnap))
+        assertTrue(stayWait.status.contains("外部软件体验中"))
+
+        // After 11s -> pulls back cleanly
+        val backAct = assertIs<EngineAction.BringBiliToFront>(engine.step(storeSnap.copy(timestampMs = 14500L)))
+        assertEquals(1, backAct.attempt)
+    }
+
+    @Test
+    fun `never presses Back on transient empty frame right after swiping episode or inside drama container`() {
+        val engine = DramaStateEngine(DramaConfig(episodeSettleMs = 400L, postSeekWaitMs = 900L))
+        engine.start(1000L)
+
+        val ep8Snap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = "${BiliNodes.ACTIVITY_APP_CONTAINER_PREFIX}0",
+            screenWidth = 1440,
+            screenHeight = 3200,
+            nodes = listOf(
+                node(id = BiliNodes.ID_ALBUM_SELECT_TEXT, text = "全集 · 选集(8/38)"),
+                node(id = BiliNodes.ID_CTRL_SEEKBAR, bounds = RectBounds(45, 2839, 1418, 2952))
+            ),
+            timestampMs = 1500L
+        )
+        assertIs<EngineAction.Wait>(engine.step(ep8Snap))
+        assertIs<EngineAction.SeekRatio>(engine.step(ep8Snap.copy(timestampMs = 2000L)))
+        assertIs<EngineAction.SwipeNextEpisode>(engine.step(ep8Snap.copy(timestampMs = 3100L)))
+
+        // 450ms later, ViewPager2 transition / next episode load yields a transient empty frame
+        val emptySameContainer = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = "${BiliNodes.ACTIVITY_APP_CONTAINER_PREFIX}0",
+            screenWidth = 1440,
+            screenHeight = 3200,
+            nodes = emptyList(),
+            timestampMs = 3550L
+        )
+        assertIs<EngineAction.Wait>(engine.step(emptySameContainer))
+        // Even 5s later while still inside AppContainerActivity0, never press Back to exit the drama mini-program
+        assertIs<EngineAction.Wait>(engine.step(emptySameContainer.copy(timestampMs = 8550L)))
+    }
 }

@@ -41,7 +41,7 @@ object RuleMatcher {
         }
         val compact = snapshot.allTexts().joinToString("")
         if (BiliNodes.REWARD_DONE_KEYWORDS.any { compact.contains(it) } ||
-            BiliNodes.EXTERNAL_JUMP_PROMPT_KEYWORDS.any { compact.contains(it) } ||
+            matchesJumpPrompt(compact) ||
             compact.contains("秒后可获得奖励") ||
             compact.contains("领取奖励")
         ) {
@@ -196,10 +196,16 @@ object RuleMatcher {
 
     private val ACTIVE_COUNTDOWN_REGEX = Regex("\\d+\\s*[秒sS]")
 
+    fun matchesJumpPrompt(text: String): Boolean {
+        if (text.isBlank()) return false
+        if (BiliNodes.EXTERNAL_JUMP_PROMPT_KEYWORDS.any { text.contains(it) }) return true
+        return BiliNodes.EXTERNAL_JUMP_PROMPT_REGEX.containsMatchIn(text)
+    }
+
     fun isActiveCountdownText(text: String): Boolean {
         if (text.isBlank()) return false
         if (BiliNodes.REWARD_DONE_KEYWORDS.any { text.contains(it) }) return false
-        if (BiliNodes.EXTERNAL_JUMP_PROMPT_KEYWORDS.any { text.contains(it) }) return false
+        if (matchesJumpPrompt(text)) return false
         if (!ACTIVE_COUNTDOWN_REGEX.containsMatchIn(text)) return false
         return text.contains("秒后") ||
             text.contains("s后", ignoreCase = true) ||
@@ -214,13 +220,22 @@ object RuleMatcher {
     fun classifyAd(snapshot: UiSnapshot): AdClassification {
         val visibleTexts = snapshot.allTexts()
         val joined = visibleTexts.joinToString(" | ")
-        val compact = visibleTexts.joinToString("")
 
-        // 1. Retention dialog ("继续观看领取奖励" vs "放弃机会")
+        // Detect explicit jump-experience prompts ("前往10秒即可获得奖励", "前往体验10秒获得奖励", etc.),
+        // strictly excluding ID_TV_COUNTDOWN and active countdowns ("8秒后可获得奖励").
+        val nonCountdownTexts = snapshot.nodes
+            .filter { it.visible && it.viewId != BiliNodes.ID_TV_COUNTDOWN && it.displayLabel.isNotEmpty() }
+            .map { it.displayLabel }
+            .filter { !isActiveCountdownText(it) }
+        val nonCountdownCompact = nonCountdownTexts.joinToString("")
+        val jumpPrompt = nonCountdownTexts.firstOrNull { matchesJumpPrompt(it) }
+            ?: if (matchesJumpPrompt(nonCountdownCompact)) nonCountdownCompact.take(24) else null
+
+        // 1. Retention dialog ("继续观看领取奖励" vs "放弃机会") — only when NOT a jump-experience modal
         val hasAvoidText = visibleTexts.any { txt ->
             BiliNodes.RETENTION_AVOID_KEYWORDS.any { txt.contains(it) }
         }
-        if (hasAvoidText) {
+        if (hasAvoidText && jumpPrompt == null) {
             val continueNode = findClickableByKeywords(snapshot, BiliNodes.RETENTION_CONTINUE_KEYWORDS)
             if (continueNode != null) {
                 return AdClassification.RetentionDialog(continueNode)
@@ -247,17 +262,7 @@ object RuleMatcher {
             return AdClassification.Rewarded(closeNode = closeNode, hasSwipeGuide = hasSwipeGuide)
         }
 
-        // 3. External app experience jump task ("前往体验10秒获得奖励" / "去体验 10秒 即可获得奖励！！").
-        // Exclude ID_TV_COUNTDOWN and active countdown labels ("8秒后可获得奖励") so normal video ads
-        // with bottom CTA cards ("去看看" / "立即购买") are NEVER mistakenly clicked!
-        val nonCountdownTexts = snapshot.nodes
-            .filter { it.visible && it.viewId != BiliNodes.ID_TV_COUNTDOWN && it.displayLabel.isNotEmpty() }
-            .map { it.displayLabel }
-            .filter { !isActiveCountdownText(it) }
-        val nonCountdownCompact = nonCountdownTexts.joinToString("")
-        val jumpPrompt = nonCountdownTexts.firstOrNull { txt ->
-            BiliNodes.EXTERNAL_JUMP_PROMPT_KEYWORDS.any { txt.contains(it) }
-        } ?: BiliNodes.EXTERNAL_JUMP_PROMPT_KEYWORDS.firstOrNull { nonCountdownCompact.contains(it) }
+        // 3. External app experience jump task ("前往10秒即可获得奖励" / "前往体验10秒获得奖励" / "去体验 10秒 即可获得奖励！！")
         if (jumpPrompt != null) {
             val goNode = findExternalJumpActionNode(snapshot)
             if (goNode != null) {
@@ -270,6 +275,11 @@ object RuleMatcher {
         }
         return AdClassification.Waiting(status)
     }
+
+    fun findTimeoutDismissButton(snapshot: UiSnapshot): UiNode? =
+        findClickableByKeywords(snapshot, BiliNodes.RETENTION_AVOID_KEYWORDS)
+            ?: snapshot.firstById(BiliNodes.ID_TV_CLOSE)
+            ?: findClickableByKeywords(snapshot, BiliNodes.CLOSE_BUTTON_TEXTS)
 
     fun isJumpConfirmationDialog(snapshot: UiSnapshot): Boolean {
         if (snapshot.packageName in BiliNodes.SYSTEM_CONFIRM_PACKAGES) return true
@@ -341,7 +351,7 @@ object RuleMatcher {
                 node.bounds.isOnScreen(snapshot.screenWidth, snapshot.screenHeight) &&
                 node.viewId != BiliNodes.ID_TV_CLOSE &&
                 node.viewId != BiliNodes.ID_TV_COUNTDOWN &&
-                !BiliNodes.EXTERNAL_JUMP_PROMPT_KEYWORDS.any { node.displayLabel.contains(it) } &&
+                !matchesJumpPrompt(node.displayLabel) &&
                 BiliNodes.EXTERNAL_JUMP_ACTION_KEYWORDS.any { node.displayLabel.contains(it) } &&
                 jumpForbidden.none { node.displayLabel.contains(it) }
         }

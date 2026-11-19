@@ -173,6 +173,7 @@ object BiliNodes {
     val EXTERNAL_JUMP_PROMPT_KEYWORDS = listOf(
         "前往体验",
         "去体验",
+        "继续体验",
         "前往获得激励",
         "点击广告即可获得奖励",
         "点击即可获得奖励",
@@ -183,18 +184,29 @@ object BiliNodes {
         "尚未满足体验时长"
     )
 
+    // Matches dynamic jump prompts like "前往10秒即可获得奖励", "前往9秒即可获得奖励",
+    // "跳转15秒获得奖励", "10秒即可领取奖励", while strictly excluding countdowns like "8秒后可获得奖励".
+    val EXTERNAL_JUMP_PROMPT_REGEX = Regex(
+        "(?:前往|去|跳转|浏览|体验|试玩|点击).{0,8}\\d+\\s*[秒sS].{0,8}(?:获得|领取|解锁|奖励|激励)|\\d+\\s*[秒sS]即可(?:获得|领取|解锁)"
+    )
+
     val EXTERNAL_JUMP_ACTION_KEYWORDS = listOf(
         "查看详情",
         "立即查看",
         "前往",
         "去体验",
         "立即体验",
+        "马上体验",
+        "继续体验",
         "去看看",
         "立即前往",
         "点击前往",
         "去逛逛",
         "立即购买",
         "立即抢购",
+        "去下单",
+        "领券购买",
+        "立即打开",
         "了解详情",
         "立即领取"
     )
@@ -264,6 +276,14 @@ object BiliNodes {
         "禁止"
     )
 
+    val APK_INSTALLER_PACKAGES = setOf(
+        "com.android.packageinstaller",
+        "com.google.android.packageinstaller",
+        "com.miui.packageinstaller",
+        "com.miui.global.packageinstaller",
+        "com.samsung.android.packageinstaller"
+    )
+
     val APP_STORE_AND_INSTALLER_PACKAGES = setOf(
         "com.android.vending",
         "com.xiaomi.market",
@@ -278,13 +298,8 @@ object BiliNodes {
         "com.sec.android.app.samsungapps",
         "com.tencent.android.qqdownloader",
         "com.qihoo.appstore",
-        "com.baidu.appsearch",
-        "com.android.packageinstaller",
-        "com.google.android.packageinstaller",
-        "com.miui.packageinstaller",
-        "com.miui.global.packageinstaller",
-        "com.samsung.android.packageinstaller"
-    )
+        "com.baidu.appsearch"
+    ) + APK_INSTALLER_PACKAGES
 
     // Launcher / system / plugin packages that indicate user intentionally left Bilibili (never fight Home)
     val NON_AD_PAUSE_PACKAGES = setOf(
