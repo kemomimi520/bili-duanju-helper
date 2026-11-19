@@ -13,6 +13,8 @@ object BiliNodes {
 
     // Short-drama player & lock View IDs
     const val ID_TOOLBAR_TITLE = "tv.danmaku.bili:id/toolbar_title"
+    const val ID_ALBUM_NAME_V2 = "tv.danmaku.bili:id/tv_album_name_v2"
+    const val ID_ALBUM_SELECT_LAYOUT = "tv.danmaku.bili:id/album_select_episode_layout"
     const val ID_ALBUM_SELECT_TEXT = "tv.danmaku.bili:id/tv_album_select_text_v2"
     const val ID_FEED_VIDEOS = "tv.danmaku.bili:id/feed_videos"
     const val ID_CTRL_SEEKBAR = "tv.danmaku.bili:id/ctrl_seekbar"
@@ -199,15 +201,49 @@ object BiliNodes {
     val SYSTEM_CONFIRM_PACKAGES = setOf(
         "com.miui.securitycenter",
         "com.lbe.security.miui",
+        "com.miui.guardprovider",
         "com.android.packageinstaller",
         "com.google.android.packageinstaller",
+        "com.android.permissioncontroller",
+        "com.google.android.permissioncontroller",
+        "com.android.intentresolver",
+        "com.google.android.intentresolver",
+        "com.oplus.safecenter",
+        "com.coloros.safecenter",
+        "com.iqoo.secure",
+        "com.vivo.permissionmanager",
+        "com.huawei.systemmanager",
+        "com.hihonor.systemmanager",
+        "com.samsung.android.permissioncontroller",
         "android"
+    )
+
+    val JUMP_CONFIRM_DIALOG_HINTS = listOf(
+        "即将离开",
+        "离开哔哩哔哩",
+        "离开短剧",
+        "想要打开",
+        "允许打开",
+        "是否允许",
+        "打开其他应用",
+        "打开第三方",
+        "跳转至",
+        "跳转到",
+        "外部应用",
+        "第三方应用",
+        "应用商店",
+        "下载并安装",
+        "允许一次"
     )
 
     val SYSTEM_ALLOW_BUTTON_TEXTS = listOf(
         "允许",
         "打开",
+        "立即打开",
+        "始终允许",
+        "仍要打开",
         "继续",
+        "同意",
         "确定"
     )
 
@@ -223,8 +259,12 @@ object BiliNodes {
         "com.android.vending",
         "com.xiaomi.market",
         "com.huawei.appmarket",
+        "com.hihonor.appmarket",
         "com.oppo.market",
+        "com.heytap.market",
+        "com.oplus.appdetail",
         "com.bbk.appstore",
+        "com.vivo.appstore",
         "com.meizu.mstore",
         "com.sec.android.app.samsungapps",
         "com.tencent.android.qqdownloader",
@@ -232,7 +272,9 @@ object BiliNodes {
         "com.baidu.appsearch",
         "com.android.packageinstaller",
         "com.google.android.packageinstaller",
-        "com.miui.packageinstaller"
+        "com.miui.packageinstaller",
+        "com.miui.global.packageinstaller",
+        "com.samsung.android.packageinstaller"
     )
 
     // Launcher / system / plugin packages that indicate user intentionally left Bilibili (never fight Home)
@@ -240,10 +282,24 @@ object BiliNodes {
         "com.miui.home",
         "com.miui.launcher",
         "com.lge.launcher3",
+        "com.oppo.launcher",
+        "com.oplus.launcher",
+        "com.bbk.launcher2",
+        "com.huawei.android.launcher",
+        "com.hihonor.android.launcher",
+        "com.sec.android.app.launcher",
+        "com.google.android.apps.nexuslauncher",
         "com.android.launcher",
         "com.android.launcher3",
         "com.android.systemui",
         "com.android.settings",
         "com.bili.drama.accessibility"
+    )
+
+    val RETURN_TO_BILI_TEXTS = listOf(
+        "返回哔哩哔哩",
+        "回到哔哩哔哩",
+        "返回B站",
+        "回到B站"
     )
 }

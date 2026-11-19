@@ -5,36 +5,55 @@ import android.content.Context
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
+import android.util.DisplayMetrics
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
+import kotlin.math.abs
 
 /**
  * Lightweight TYPE_ACCESSIBILITY_OVERLAY floating pill.
- * Does not require SYSTEM_ALERT_WINDOW and satisfies Android 15/16 visible-overlay BAL rules.
+ * Draggable from anywhere on the pill, includes an explicit '✕' close button,
+ * and remembers its last screen coordinates without requiring SYSTEM_ALERT_WINDOW.
  */
 class FloatingController(
     private val context: Context,
     private val windowManager: WindowManager,
-    private val onToggleClick: () -> Unit
+    private val onToggleClick: () -> Unit,
+    private val onCloseClick: () -> Unit,
+    private val onPositionSaved: (Int, Int) -> Unit
 ) {
     private var container: LinearLayout? = null
     private var actionBtn: TextView? = null
     private var statusText: TextView? = null
+    private var closeBtn: TextView? = null
     private var layoutParams: WindowManager.LayoutParams? = null
 
+    val isShowing: Boolean
+        get() = container != null
+
     @SuppressLint("ClickableViewAccessibility")
-    fun show() {
-        if (container != null) return
+    fun show(savedPosition: Pair<Int, Int>? = null) {
+        val existing = container
+        if (existing != null) {
+            if (existing.visibility != View.VISIBLE) {
+                existing.visibility = View.VISIBLE
+            }
+            return
+        }
         val dp = context.resources.displayMetrics.density
+        val touchSlop = ViewConfiguration.get(context).scaledTouchSlop.coerceAtLeast(8)
+        val (screenW, screenH) = getRealScreenSize()
 
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding((10 * dp).toInt(), (7 * dp).toInt(), (12 * dp).toInt(), (7 * dp).toInt())
+            setPadding((8 * dp).toInt(), (6 * dp).toInt(), (8 * dp).toInt(), (6 * dp).toInt())
             background = GradientDrawable().apply {
                 setColor(0xDD1A1C22.toInt())
                 cornerRadius = 22 * dp
@@ -51,23 +70,36 @@ class FloatingController(
                 setColor(0xFFFB7299.toInt())
                 cornerRadius = 14 * dp
             }
-            setOnClickListener {
-                android.util.Log.i("BiliDramaAcc", "Pill button clicked")
-                onToggleClick()
-            }
         }
 
         val status = TextView(context).apply {
             text = "待机中"
             textSize = 12f
             setTextColor(0xFFE5E7EB.toInt())
-            setPadding((8 * dp).toInt(), 0, 0, 0)
-            maxWidth = (180 * dp).toInt()
+            setPadding((8 * dp).toInt(), 0, (6 * dp).toInt(), 0)
+            maxWidth = (165 * dp).toInt()
             maxLines = 1
+        }
+
+        val close = TextView(context).apply {
+            text = "✕"
+            textSize = 12f
+            setTextColor(0xFFD1D5DB.toInt())
+            setPadding((7 * dp).toInt(), (4 * dp).toInt(), (7 * dp).toInt(), (4 * dp).toInt())
+            background = GradientDrawable().apply {
+                setColor(0x33FFFFFF)
+                cornerRadius = 12 * dp
+            }
         }
 
         root.addView(btn)
         root.addView(status)
+        root.addView(close)
+
+        val defaultX = (16 * dp).toInt()
+        val defaultY = (160 * dp).toInt()
+        val initX = savedPosition?.first ?: defaultX
+        val initY = savedPosition?.second ?: defaultY
 
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -77,54 +109,84 @@ class FloatingController(
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = (16 * dp).toInt()
-            y = (160 * dp).toInt()
+            x = initX.coerceIn(0, (screenW - (120 * dp).toInt()).coerceAtLeast(0))
+            y = initY.coerceIn(0, (screenH - (56 * dp).toInt()).coerceAtLeast(0))
         }
 
-        var downX = 0f
-        var downY = 0f
-        var startX = 0
-        var startY = 0
-        var dragging = false
+        fun createDragOrTapListener(onTap: () -> Unit): View.OnTouchListener {
+            var downX = 0f
+            var downY = 0f
+            var startX = 0
+            var startY = 0
+            var dragging = false
 
-        status.setOnTouchListener { _, event ->
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    downX = event.rawX
-                    downY = event.rawY
-                    startX = params.x
-                    startY = params.y
-                    dragging = false
-                    true
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    val dx = (event.rawX - downX).toInt()
-                    val dy = (event.rawY - downY).toInt()
-                    if (kotlin.math.abs(dx) > 8 || kotlin.math.abs(dy) > 8) {
-                        dragging = true
-                        params.x = startX + dx
-                        params.y = startY + dy
-                        runCatching { windowManager.updateViewLayout(root, params) }
+            return View.OnTouchListener { _, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        downX = event.rawX
+                        downY = event.rawY
+                        startX = params.x
+                        startY = params.y
+                        dragging = false
+                        true
                     }
-                    true
-                }
-                MotionEvent.ACTION_UP -> {
-                    if (!dragging) {
-                        android.util.Log.i("BiliDramaAcc", "Pill status tapped")
-                        onToggleClick()
+                    MotionEvent.ACTION_MOVE -> {
+                        val dx = (event.rawX - downX).toInt()
+                        val dy = (event.rawY - downY).toInt()
+                        if (abs(dx) > touchSlop || abs(dy) > touchSlop) {
+                            dragging = true
+                        }
+                        if (dragging) {
+                            val (curW, curH) = getRealScreenSize()
+                            val viewW = root.width.takeIf { it > 0 } ?: (180 * dp).toInt()
+                            val viewH = root.height.takeIf { it > 0 } ?: (48 * dp).toInt()
+                            params.x = (startX + dx).coerceIn(0, (curW - viewW).coerceAtLeast(0))
+                            params.y = (startY + dy).coerceIn(0, (curH - viewH).coerceAtLeast(0))
+                            runCatching { windowManager.updateViewLayout(root, params) }
+                        }
+                        true
                     }
-                    true
+                    MotionEvent.ACTION_UP -> {
+                        if (dragging) {
+                            onPositionSaved(params.x, params.y)
+                        } else {
+                            onTap()
+                        }
+                        dragging = false
+                        true
+                    }
+                    MotionEvent.ACTION_CANCEL -> {
+                        dragging = false
+                        false
+                    }
+                    else -> false
                 }
-                else -> false
             }
         }
+
+        val toggleTouch = createDragOrTapListener {
+            android.util.Log.i("BiliDramaAcc", "Pill toggled")
+            onToggleClick()
+        }
+        val closeTouch = createDragOrTapListener {
+            android.util.Log.i("BiliDramaAcc", "Pill closed by user")
+            onCloseClick()
+        }
+
+        root.setOnTouchListener(toggleTouch)
+        btn.setOnTouchListener(toggleTouch)
+        status.setOnTouchListener(toggleTouch)
+        close.setOnTouchListener(closeTouch)
 
         runCatching {
             windowManager.addView(root, params)
             container = root
             actionBtn = btn
             statusText = status
+            closeBtn = close
             layoutParams = params
+        }.onFailure {
+            android.util.Log.w("BiliDramaAcc", "Floating addView failed: ${it.message}", it)
         }
     }
 
@@ -134,6 +196,7 @@ class FloatingController(
         container = null
         actionBtn = null
         statusText = null
+        closeBtn = null
         layoutParams = null
     }
 
@@ -149,5 +212,22 @@ class FloatingController(
             if (running) 0xFFEF4444.toInt() else 0xFFFB7299.toInt()
         )
         status.text = message
+    }
+
+    @Suppress("DEPRECATION")
+    private fun getRealScreenSize(): Pair<Int, Int> {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val bounds = windowManager.maximumWindowMetrics.bounds
+            if (bounds.width() > 0 && bounds.height() > 0) {
+                return bounds.width() to bounds.height()
+            }
+        }
+        val dm = DisplayMetrics()
+        windowManager.defaultDisplay?.getRealMetrics(dm)
+        if (dm.widthPixels > 0 && dm.heightPixels > 0) {
+            return dm.widthPixels to dm.heightPixels
+        }
+        val fallback = context.resources.displayMetrics
+        return fallback.widthPixels to fallback.heightPixels
     }
 }

@@ -2,19 +2,23 @@ package com.bili.drama.accessibility
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.app.ActivityOptions
+import android.app.PendingIntent
 import android.content.Intent
 import android.graphics.Path
 import android.graphics.Rect
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.util.DisplayMetrics
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.bili.drama.core.BiliNodes
 import com.bili.drama.core.DramaStateEngine
 import com.bili.drama.core.EngineAction
-import com.bili.drama.core.EnginePhase
 import com.bili.drama.core.RectBounds
+import com.bili.drama.core.RuleMatcher
 import com.bili.drama.core.UiNode
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -43,11 +47,15 @@ class DramaAccessibilityService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
     private val engine = DramaStateEngine()
     private var floating: FloatingController? = null
+    private var windowManager: WindowManager? = null
     private var isRunning = false
     private var lastActivityName = ""
     private var lastDramaContainerActivity = "${BiliNodes.ACTIVITY_APP_CONTAINER_PREFIX}0"
     private var lastAdActivityName = BiliNodes.ACTIVITY_REWARD_AD
     private var lastStatusLogged = ""
+    private var currentForegroundPkg = ""
+    private var lastDramaTitle = ""
+    private var lastFgCheckUptimeMs = 0L
 
     private val loopRunnable = object : Runnable {
         override fun run() {
@@ -63,10 +71,21 @@ class DramaAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         val wm = getSystemService(WINDOW_SERVICE) as WindowManager
-        floating = FloatingController(this, wm) { toggleBatchRun() }
-        if (AccPrefs.isOverlayEnabled(this)) {
-            floating?.show()
+        windowManager = wm
+        floating = FloatingController(
+            context = this,
+            windowManager = wm,
+            onToggleClick = { toggleBatchRun() },
+            onCloseClick = { dismissOverlayByUser() },
+            onPositionSaved = { x, y -> AccPrefs.savePillPosition(this, x, y) }
+        )
+        val initialPkg = rootInActiveWindow?.packageName?.toString().orEmpty().ifBlank {
+            windows?.firstOrNull { it.isFocused || it.isActive }?.root?.packageName?.toString().orEmpty()
         }
+        if (initialPkg.isNotBlank()) {
+            currentForegroundPkg = initialPkg
+        }
+        updateOverlayForPackage(currentForegroundPkg)
         appendLog("无障碍服务已连接")
     }
 
@@ -74,17 +93,20 @@ class DramaAccessibilityService : AccessibilityService() {
         stopBatch("服务已关闭")
         floating?.hide()
         floating = null
+        windowManager = null
         if (instance === this) instance = null
         super.onDestroy()
     }
 
     override fun onInterrupt() {
         stopBatch("无障碍服务被中断")
+        floating?.hide()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
-        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+        val et = event.eventType
+        if (et == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             val pkg = event.packageName?.toString().orEmpty()
             val cls = event.className?.toString().orEmpty()
             if (pkg == BiliNodes.PKG_BILI && cls.contains("Activity")) {
@@ -92,23 +114,93 @@ class DramaAccessibilityService : AccessibilityService() {
                 if (cls.contains("RewardAdActivity")) {
                     lastAdActivityName = cls
                 }
-            } else if (pkg.isNotBlank() && pkg != BiliNodes.PKG_BILI) {
+            } else if (pkg == BiliNodes.PKG_BILI && !lastActivityName.startsWith("com.bilibili.")) {
+                lastActivityName = ""
+            } else if (pkg.isNotBlank() && pkg != BiliNodes.PKG_BILI && pkg != "com.android.systemui") {
                 lastActivityName = cls
             }
 
-            if (AccPrefs.isOverlayEnabled(this)) {
-                floating?.show()
-                floating?.setVisible(true)
+            val isSelfOverlayWindow = pkg == "com.bili.drama.accessibility" && !cls.contains("Activity")
+            if (pkg.isNotBlank() && pkg != "com.android.systemui" && !isSelfOverlayWindow) {
+                currentForegroundPkg = pkg
+            } else {
+                val detected = detectForegroundPackage()
+                if (detected.isNotBlank()) currentForegroundPkg = detected
+            }
+            updateOverlayForPackage(currentForegroundPkg)
+            return
+        }
+
+        if (et == AccessibilityEvent.TYPE_WINDOWS_CHANGED || et == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+            val now = android.os.SystemClock.uptimeMillis()
+            if (et == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED && now - lastFgCheckUptimeMs < 250L) {
+                return
+            }
+            lastFgCheckUptimeMs = now
+            val detected = detectForegroundPackage()
+            if (detected.isNotBlank() && detected != currentForegroundPkg) {
+                currentForegroundPkg = detected
+                updateOverlayForPackage(currentForegroundPkg)
             }
         }
     }
 
+    private fun detectForegroundPackage(): String {
+        val winList = windows
+        if (!winList.isNullOrEmpty()) {
+            val appWindows = winList.filter { win ->
+                if (win.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) {
+                    return@filter false
+                }
+                val pkg = win.root?.packageName?.toString().orEmpty()
+                pkg.isNotBlank() && pkg != "com.android.systemui"
+            }
+            val focusedApp = appWindows.firstOrNull { it.isFocused || it.isActive }
+                ?: appWindows.maxByOrNull { it.layer }
+            val winPkg = focusedApp?.root?.packageName?.toString().orEmpty()
+            if (winPkg.isNotBlank()) return winPkg
+        }
+        val activePkg = rootInActiveWindow?.packageName?.toString().orEmpty()
+        return if (activePkg.isNotBlank() && activePkg != "com.android.systemui") activePkg else ""
+    }
+
+    fun dismissOverlayByUser() {
+        stopBatch("用户关闭悬浮窗")
+        AccPrefs.setOverlayEnabled(this, false)
+        floating?.hide()
+    }
+
+    fun shutdownSelf() {
+        stopBatch("用户关闭无障碍服务")
+        AccPrefs.setOverlayEnabled(this, false)
+        floating?.hide()
+        disableSelf()
+    }
+
     fun refreshOverlayVisibility() {
-        if (AccPrefs.isOverlayEnabled(this)) {
-            floating?.show()
-            floating?.setVisible(true)
-        } else if (!isRunning) {
+        updateOverlayForPackage(currentForegroundPkg)
+    }
+
+    private fun updateOverlayForPackage(pkg: String) {
+        if (!AccPrefs.isOverlayEnabled(this)) {
             floating?.hide()
+            return
+        }
+        if (isRunning) {
+            floating?.show(AccPrefs.loadPillPosition(this))
+            floating?.setVisible(true)
+            return
+        }
+        if (AccPrefs.isOnlyShowInBili(this)) {
+            if (pkg == BiliNodes.PKG_BILI) {
+                floating?.show(AccPrefs.loadPillPosition(this))
+                floating?.setVisible(true)
+            } else {
+                floating?.hide()
+            }
+        } else {
+            floating?.show(AccPrefs.loadPillPosition(this))
+            floating?.setVisible(true)
         }
     }
 
@@ -124,7 +216,7 @@ class DramaAccessibilityService : AccessibilityService() {
         engine.updateConfig(AccPrefs.loadConfig(this))
         engine.start(System.currentTimeMillis())
         isRunning = true
-        floating?.show()
+        floating?.show(AccPrefs.loadPillPosition(this))
         floating?.setVisible(true)
         floating?.updateState(true, "启动中...")
         appendLog("开始自动刷全集解锁")
@@ -137,22 +229,48 @@ class DramaAccessibilityService : AccessibilityService() {
         handler.removeCallbacks(loopRunnable)
         engine.stop()
         floating?.updateState(false, reason)
+        updateOverlayForPackage(currentForegroundPkg)
         appendLog("已停止: $reason")
     }
 
+    @Suppress("DEPRECATION")
+    private fun getRealScreenSize(): Pair<Int, Int> {
+        val wm = windowManager ?: (getSystemService(WINDOW_SERVICE) as WindowManager)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val bounds = wm.maximumWindowMetrics.bounds
+            if (bounds.width() > 0 && bounds.height() > 0) {
+                return bounds.width() to bounds.height()
+            }
+        }
+        val dm = DisplayMetrics()
+        wm.defaultDisplay?.getRealMetrics(dm)
+        if (dm.widthPixels > 0 && dm.heightPixels > 0) {
+            return dm.widthPixels to dm.heightPixels
+        }
+        val fallback = resources.displayMetrics
+        return fallback.widthPixels to fallback.heightPixels
+    }
+
     private fun runSingleTick(): Long {
-        val dm = resources.displayMetrics
+        val (screenW, screenH) = getRealScreenSize()
         var scan = NodeScanner.capture(
             windows = windows ?: emptyList(),
             activeRoot = rootInActiveWindow,
-            screenWidth = dm.widthPixels,
-            screenHeight = dm.heightPixels,
+            screenWidth = screenW,
+            screenHeight = screenH,
             lastActivityName = lastActivityName
         )
-        if (com.bili.drama.core.RuleMatcher.hasShortDramaStructure(scan.snapshot)) {
+        val snapPkg = scan.snapshot.packageName
+        if (snapPkg.isNotBlank() && snapPkg != "com.android.systemui" && snapPkg != "com.bili.drama.accessibility") {
+            currentForegroundPkg = snapPkg
+        }
+        if (RuleMatcher.hasShortDramaStructure(scan.snapshot)) {
+            scan.snapshot.firstById(BiliNodes.ID_ALBUM_NAME_V2)?.displayLabel?.takeIf { it.isNotBlank() }?.let {
+                lastDramaTitle = it
+            }
             if (lastActivityName.startsWith(BiliNodes.ACTIVITY_APP_CONTAINER_PREFIX)) {
                 lastDramaContainerActivity = lastActivityName
-            } else if (lastActivityName.contains("RewardAdActivity")) {
+            } else if (lastActivityName.contains("RewardAdActivity") || !lastActivityName.startsWith("com.bilibili.")) {
                 lastActivityName = lastDramaContainerActivity
                 scan = scan.copy(snapshot = scan.snapshot.copy(activityName = lastActivityName))
             }
@@ -161,26 +279,29 @@ class DramaAccessibilityService : AccessibilityService() {
         val action = engine.step(scan.snapshot)
         return when (action) {
             is EngineAction.Wait -> {
-                val shouldLog = action.status.contains("已锁集") || action.status.contains("切出B站")
+                val shouldLog = action.status.contains("已锁集") ||
+                    action.status.contains("切出B站") ||
+                    action.status.contains("未能自动拉回") ||
+                    action.status.contains("等待进入短剧")
                 updateStatus(action.status, logIfChanged = shouldLog)
                 action.delayMs
             }
 
             is EngineAction.ClickNode -> {
                 updateStatus(action.reason, logIfChanged = true)
-                performClick(action.node, scan.nodeRefs[action.node.key], dm.widthPixels, dm.heightPixels)
+                performClick(action.node, scan.nodeRefs[action.node.key], screenW, screenH)
                 380L
             }
 
             is EngineAction.SeekRatio -> {
                 updateStatus(action.reason, logIfChanged = true)
-                performSeek(action.seekBar, action.ratio, action.isSecondary, dm.widthPixels, dm.heightPixels)
+                performSeek(action.seekBar, action.ratio, action.isSecondary, screenW, screenH)
                 380L
             }
 
             is EngineAction.SwipeNextEpisode -> {
                 updateStatus(action.reason, logIfChanged = true)
-                performVerticalSwipe(scan, dm.widthPixels, dm.heightPixels, engine.currentSwipeAttempt)
+                performVerticalSwipe(scan, screenW, screenH, engine.currentSwipeAttempt)
                 430L
             }
 
@@ -192,8 +313,8 @@ class DramaAccessibilityService : AccessibilityService() {
 
             is EngineAction.BringBiliToFront -> {
                 updateStatus(action.reason, logIfChanged = true)
-                bringBilibiliToFront()
-                600L
+                bringBilibiliToFront(action.attempt)
+                950L
             }
 
             is EngineAction.Stop -> {
@@ -280,7 +401,7 @@ class DramaAccessibilityService : AccessibilityService() {
             }
         }
         val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0L, 190L))
+            .addStroke(GestureDescription.StrokeDescription(path, 0L, 240L))
             .build()
         dispatchGesture(gesture, null, null)
     }
@@ -351,15 +472,122 @@ class DramaAccessibilityService : AccessibilityService() {
         dispatchGesture(gesture, null, null)
     }
 
-    private fun bringBilibiliToFront() {
-        // External app was launched on top of Bilibili's task; GLOBAL_ACTION_BACK returns directly to the ad task.
-        performGlobalAction(GLOBAL_ACTION_BACK)
-        handler.postDelayed({
-            if (!isRunning) return@postDelayed
-            val curPkg = rootInActiveWindow?.packageName?.toString().orEmpty()
-            if (curPkg != BiliNodes.PKG_BILI) {
+    /**
+     * Multi-tier return strategy so separate-task external apps (e.g. Taobao / JD / Browser / Store)
+     * and Android 13-16 devices reliably return directly to Bilibili's AppContainer / RewardAd task.
+     */
+    private fun bringBilibiliToFront(attempt: Int) {
+        when (attempt) {
+            1 -> {
                 performGlobalAction(GLOBAL_ACTION_BACK)
             }
-        }, 600L)
+            2, 5 -> {
+                switchBackViaRecents(attempt)
+            }
+            3 -> {
+                performGlobalAction(GLOBAL_ACTION_BACK)
+                handler.postDelayed({
+                    if (!isRunning) return@postDelayed
+                    val curPkg = rootInActiveWindow?.packageName?.toString().orEmpty()
+                    if (curPkg != BiliNodes.PKG_BILI) {
+                        performGlobalAction(GLOBAL_ACTION_BACK)
+                    }
+                }, 350L)
+            }
+            else -> {
+                launchBilibiliViaIntent()
+            }
+        }
+    }
+
+    private fun switchBackViaRecents(attempt: Int) {
+        performGlobalAction(GLOBAL_ACTION_RECENTS)
+        handler.postDelayed({
+            if (!isRunning) return@postDelayed
+            val (screenW, screenH) = getRealScreenSize()
+            val recentsScan = NodeScanner.capture(
+                windows = windows ?: emptyList(),
+                activeRoot = rootInActiveWindow,
+                screenWidth = screenW,
+                screenHeight = screenH,
+                lastActivityName = ""
+            )
+            if (recentsScan.snapshot.packageName == BiliNodes.PKG_BILI) {
+                return@postDelayed
+            }
+            val keywords = buildList {
+                if (lastDramaTitle.isNotBlank()) add(lastDramaTitle)
+                add("哔哩哔哩")
+                add("漫剧")
+                add("短剧")
+            }
+            val biliCard = recentsScan.snapshot.nodes.firstOrNull { node ->
+                val lbl = node.displayLabel
+                lbl.isNotBlank() &&
+                    node.bounds.isOnScreen(screenW, screenH) &&
+                    keywords.any { lbl.contains(it, ignoreCase = true) }
+            }
+            if (biliCard != null) {
+                appendLog("通过最近任务卡片切回B站: ${biliCard.displayLabel}")
+                performClick(biliCard, recentsScan.nodeRefs[biliCard.key], screenW, screenH)
+            } else if (attempt == 2) {
+                appendLog("尝试点击最近任务左侧前一应用卡片")
+                tapPoint(screenW * 0.14f, screenH * 0.48f)
+            } else {
+                appendLog("右滑最近任务并点击切回前序应用")
+                val path = Path().apply {
+                    moveTo(screenW * 0.20f, screenH * 0.48f)
+                    lineTo(screenW * 0.80f, screenH * 0.48f)
+                }
+                val gesture = GestureDescription.Builder()
+                    .addStroke(GestureDescription.StrokeDescription(path, 0L, 180L))
+                    .build()
+                dispatchGesture(gesture, null, null)
+                handler.postDelayed({
+                    if (isRunning && currentForegroundPkg != BiliNodes.PKG_BILI) {
+                        tapPoint(screenW * 0.50f, screenH * 0.48f)
+                    }
+                }, 320L)
+            }
+        }, 480L)
+    }
+
+    private fun launchBilibiliViaIntent() {
+        val launch = packageManager.getLaunchIntentForPackage(BiliNodes.PKG_BILI)?.apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+        }
+        if (launch == null) {
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            return
+        }
+        val launched = runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                val opts = ActivityOptions.makeBasic().apply {
+                    setPendingIntentBackgroundActivityStartMode(
+                        ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+                    )
+                }.toBundle()
+                val pi = PendingIntent.getActivity(
+                    this,
+                    1001,
+                    launch,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                    opts
+                )
+                pi.send()
+            } else {
+                startActivity(launch)
+            }
+            true
+        }.getOrElse {
+            runCatching {
+                startActivity(launch)
+                true
+            }.getOrDefault(false)
+        }
+        appendLog(if (launched) "通过Intent拉回B站前台" else "Intent拉回失败，尝试系统返回")
+        if (!launched) {
+            performGlobalAction(GLOBAL_ACTION_BACK)
+        }
     }
 }

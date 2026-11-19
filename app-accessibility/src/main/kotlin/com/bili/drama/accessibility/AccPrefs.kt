@@ -15,6 +15,9 @@ object AccPrefs {
     private const val KEY_AD_TIMEOUT = "ad_timeout_seconds"
     private const val KEY_POST_SEEK_WAIT = "post_seek_wait_ms_v2"
     private const val KEY_OVERLAY_ENABLED = "overlay_enabled"
+    private const val KEY_ONLY_IN_BILI = "only_show_in_bili"
+    private const val KEY_PILL_X = "pill_pos_x"
+    private const val KEY_PILL_Y = "pill_pos_y"
 
     private fun prefs(context: Context): SharedPreferences =
         context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
@@ -52,5 +55,25 @@ object AccPrefs {
 
     fun setOverlayEnabled(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(KEY_OVERLAY_ENABLED, enabled).apply()
+    }
+
+    fun isOnlyShowInBili(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_ONLY_IN_BILI, true)
+
+    fun setOnlyShowInBili(context: Context, onlyInBili: Boolean) {
+        prefs(context).edit().putBoolean(KEY_ONLY_IN_BILI, onlyInBili).apply()
+    }
+
+    fun loadPillPosition(context: Context): Pair<Int, Int>? {
+        val p = prefs(context)
+        if (!p.contains(KEY_PILL_X) || !p.contains(KEY_PILL_Y)) return null
+        return p.getInt(KEY_PILL_X, 0) to p.getInt(KEY_PILL_Y, 0)
+    }
+
+    fun savePillPosition(context: Context, x: Int, y: Int) {
+        prefs(context).edit()
+            .putInt(KEY_PILL_X, x)
+            .putInt(KEY_PILL_Y, y)
+            .apply()
     }
 }

@@ -651,4 +651,188 @@ class DramaEngineTest {
         val waitAction = assertIs<EngineAction.Wait>(engine.step(loadingMiniAppSnap))
         assertTrue(waitAction.status.contains("等待进入短剧播放页"))
     }
+
+    @Test
+    fun `escalates multi-attempt pullback from external app and launcher without stalling`() {
+        val engine = DramaStateEngine(DramaConfig(externalStaySeconds = 11))
+        engine.start(1000L)
+
+        // Start inside target short drama so dramaContainerActivity is captured
+        val dramaSnap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = "${BiliNodes.ACTIVITY_APP_CONTAINER_PREFIX}0",
+            screenWidth = 1440,
+            screenHeight = 3120,
+            nodes = listOf(
+                node(id = BiliNodes.ID_ALBUM_SELECT_TEXT, text = "全集 · 选集(5/38)"),
+                node(id = BiliNodes.ID_TV_PREVIEW_RIGHT_BUTTON, text = "看广告免费解锁")
+            ),
+            timestampMs = 1500L
+        )
+        assertIs<EngineAction.ClickNode>(engine.step(dramaSnap))
+
+        val jumpAdSnap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = BiliNodes.ACTIVITY_REWARD_AD,
+            screenWidth = 1440,
+            screenHeight = 3120,
+            nodes = listOf(
+                node(text = "前往体验10秒获得奖励"),
+                node(text = "查看详情")
+            ),
+            timestampMs = 3000L
+        )
+        assertIs<EngineAction.ClickNode>(engine.step(jumpAdSnap))
+
+        val taobaoSnap = UiSnapshot(
+            packageName = "com.taobao.taobao",
+            activityName = "com.taobao.tao.TBMainActivity",
+            screenWidth = 1440,
+            screenHeight = 3120,
+            nodes = emptyList(),
+            timestampMs = 5000L
+        )
+        assertIs<EngineAction.Wait>(engine.step(taobaoSnap))
+
+        // After 11s external stay: attempt 1 -> Back
+        val a1 = assertIs<EngineAction.BringBiliToFront>(engine.step(taobaoSnap.copy(timestampMs = 16500L)))
+        assertEquals(1, a1.attempt)
+
+        // Back landed on OPPO Launcher instead of Bilibili -> must STILL escalate to attempt 2 (Recents), NOT pause!
+        val launcherSnap = taobaoSnap.copy(packageName = "com.oppo.launcher", timestampMs = 18000L)
+        val a2 = assertIs<EngineAction.BringBiliToFront>(engine.step(launcherSnap))
+        assertEquals(2, a2.attempt)
+
+        // Continue escalating up to MAX_RETURN_ATTEMPTS (6) if needed
+        val a3 = assertIs<EngineAction.BringBiliToFront>(engine.step(taobaoSnap.copy(timestampMs = 19500L)))
+        assertEquals(3, a3.attempt)
+        val a4 = assertIs<EngineAction.BringBiliToFront>(engine.step(taobaoSnap.copy(timestampMs = 21000L)))
+        assertEquals(4, a4.attempt)
+        val a5 = assertIs<EngineAction.BringBiliToFront>(engine.step(taobaoSnap.copy(timestampMs = 22500L)))
+        assertEquals(5, a5.attempt)
+        val a6 = assertIs<EngineAction.BringBiliToFront>(engine.step(taobaoSnap.copy(timestampMs = 24000L)))
+        assertEquals(6, a6.attempt)
+
+        // After attempt 6 fails, pauses calmly without giving up, and resumes once user/system returns to Bilibili
+        val manualPrompt = assertIs<EngineAction.Wait>(engine.step(taobaoSnap.copy(timestampMs = 25500L)))
+        assertTrue(manualPrompt.status.contains("请手动切回B站"))
+
+        val rewardedSnap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = BiliNodes.ACTIVITY_REWARD_AD,
+            screenWidth = 1440,
+            screenHeight = 3120,
+            nodes = listOf(
+                node(id = BiliNodes.ID_TV_COUNTDOWN, text = "已获得奖励"),
+                node(id = BiliNodes.ID_TV_CLOSE, text = "关闭")
+            ),
+            timestampMs = 27000L
+        )
+        val closeAction = assertIs<EngineAction.ClickNode>(engine.step(rewardedSnap))
+        assertEquals(BiliNodes.ID_TV_CLOSE, closeAction.node.viewId)
+    }
+
+    @Test
+    fun `handles cross-OEM and in-app Bilibili jump confirmation dialogs`() {
+        val engine = DramaStateEngine(DramaConfig(interceptExternalJumps = true))
+        engine.start(1000L)
+
+        // Enter watching ad state
+        val adSnap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = BiliNodes.ACTIVITY_REWARD_AD,
+            screenWidth = 1440,
+            screenHeight = 3120,
+            nodes = listOf(node(id = BiliNodes.ID_TV_COUNTDOWN, text = "12秒后可获得奖励")),
+            timestampMs = 2000L
+        )
+        assertIs<EngineAction.Wait>(engine.step(adSnap))
+
+        // Unsolicited OPPO safecenter / Android 14 intentresolver popup -> must deny ("取消")
+        val oplusDialog = UiSnapshot(
+            packageName = "com.oplus.safecenter",
+            activityName = "com.oplus.safecenter.ConfirmDialog",
+            screenWidth = 1440,
+            screenHeight = 3120,
+            nodes = listOf(
+                node(text = "哔哩哔哩想要打开拼多多"),
+                node(text = "取消"),
+                node(text = "允许")
+            ),
+            timestampMs = 3200L
+        )
+        val denyOplus = assertIs<EngineAction.ClickNode>(engine.step(oplusDialog))
+        assertEquals("取消", denyOplus.node.text)
+
+        // Bilibili's own in-app jump confirmation during an intentional 10s experience task -> must confirm ("立即打开")
+        val jumpTaskSnap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = BiliNodes.ACTIVITY_REWARD_AD,
+            screenWidth = 1440,
+            screenHeight = 3120,
+            nodes = listOf(node(text = "前往体验10秒获得奖励"), node(text = "查看详情")),
+            timestampMs = 4500L
+        )
+        assertIs<EngineAction.ClickNode>(engine.step(jumpTaskSnap))
+
+        val inAppLeaveDialog = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = BiliNodes.ACTIVITY_REWARD_AD,
+            screenWidth = 1440,
+            screenHeight = 3120,
+            nodes = listOf(
+                node(text = "即将离开哔哩哔哩，跳转至第三方应用"),
+                node(text = "取消"),
+                node(text = "立即打开")
+            ),
+            timestampMs = 5800L
+        )
+        val confirmLeave = assertIs<EngineAction.ClickNode>(engine.step(inAppLeaveDialog))
+        assertEquals("立即打开", confirmLeave.node.text)
+    }
+
+    @Test
+    fun `switches back to drama task if Intent lands on Bilibili MainActivity during return`() {
+        val engine = DramaStateEngine(DramaConfig(externalStaySeconds = 11))
+        engine.start(1000L)
+
+        val dramaSnap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = "${BiliNodes.ACTIVITY_APP_CONTAINER_PREFIX}0",
+            screenWidth = 1440,
+            screenHeight = 3120,
+            nodes = listOf(
+                node(id = BiliNodes.ID_ALBUM_SELECT_TEXT, text = "全集 · 选集(5/38)"),
+                node(id = BiliNodes.ID_TV_PREVIEW_RIGHT_BUTTON, text = "看广告免费解锁")
+            ),
+            timestampMs = 1500L
+        )
+        assertIs<EngineAction.ClickNode>(engine.step(dramaSnap))
+
+        val jumpAdSnap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = BiliNodes.ACTIVITY_REWARD_AD,
+            screenWidth = 1440,
+            screenHeight = 3120,
+            nodes = listOf(node(text = "前往体验10秒获得奖励"), node(text = "查看详情")),
+            timestampMs = 3000L
+        )
+        assertIs<EngineAction.ClickNode>(engine.step(jumpAdSnap))
+
+        val extSnap = UiSnapshot("com.taobao.taobao", "TBMainActivity", 1440, 3120, emptyList(), 5000L)
+        assertIs<EngineAction.Wait>(engine.step(extSnap))
+        assertIs<EngineAction.BringBiliToFront>(engine.step(extSnap.copy(timestampMs = 16500L)))
+
+        // Landing on Bilibili MainActivity must trigger task switch via BringBiliToFront instead of PressBack out of Bilibili
+        val biliMainSnap = UiSnapshot(
+            packageName = BiliNodes.PKG_BILI,
+            activityName = "tv.danmaku.bili.MainActivityV2",
+            screenWidth = 1440,
+            screenHeight = 3120,
+            nodes = emptyList(),
+            timestampMs = 18000L
+        )
+        val switchAction = assertIs<EngineAction.BringBiliToFront>(engine.step(biliMainSnap))
+        assertEquals(2, switchAction.attempt)
+    }
 }

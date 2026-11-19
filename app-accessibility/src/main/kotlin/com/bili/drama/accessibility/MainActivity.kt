@@ -24,9 +24,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var seekSwitch: Switch
     private lateinit var interceptJumpSwitch: Switch
     private lateinit var overlaySwitch: Switch
+    private lateinit var onlyInBiliSwitch: Switch
     private lateinit var externalStayInput: EditText
     private lateinit var postSeekWaitInput: EditText
     private lateinit var adTimeoutInput: EditText
+
+    private var syncingOverlaySwitch = false
 
     private val handler = Handler(Looper.getMainLooper())
     private val refreshRunnable = object : Runnable {
@@ -84,6 +87,11 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener {
                 val launch = packageManager.getLaunchIntentForPackage(BiliNodes.PKG_BILI)
                 if (launch != null) {
+                    AccPrefs.setOverlayEnabled(this@MainActivity, true)
+                    syncingOverlaySwitch = true
+                    overlaySwitch.isChecked = true
+                    syncingOverlaySwitch = false
+                    DramaAccessibilityService.instance?.refreshOverlayVisibility()
                     startActivity(launch)
                 } else {
                     Toast.makeText(this@MainActivity, "未找到哔哩哔哩", Toast.LENGTH_SHORT).show()
@@ -91,6 +99,22 @@ class MainActivity : AppCompatActivity() {
             }
         }
         root.addView(btnLaunchBili)
+
+        val btnShutdownAll = Button(this).apply {
+            text = "关闭悬浮窗并退出无障碍服务"
+            setOnClickListener {
+                val svc = DramaAccessibilityService.instance
+                if (svc != null) {
+                    svc.shutdownSelf()
+                    Toast.makeText(this@MainActivity, "已关闭悬浮窗并退出服务", Toast.LENGTH_SHORT).show()
+                } else {
+                    AccPrefs.setOverlayEnabled(this@MainActivity, false)
+                    startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                }
+                refreshStatusAndLogs()
+            }
+        }
+        root.addView(btnShutdownAll)
 
         val cfg = AccPrefs.loadConfig(this)
 
@@ -109,11 +133,27 @@ class MainActivity : AppCompatActivity() {
         root.addView(interceptJumpSwitch)
 
         overlaySwitch = Switch(this).apply {
-            text = "显示无障碍悬浮控制胶囊"
+            text = "启用无障碍悬浮控制胶囊"
             isChecked = AccPrefs.isOverlayEnabled(this@MainActivity)
-            setPadding(0, (6 * dp).toInt(), 0, (10 * dp).toInt())
+            setPadding(0, (6 * dp).toInt(), 0, (6 * dp).toInt())
+            setOnCheckedChangeListener { _, isChecked ->
+                if (syncingOverlaySwitch) return@setOnCheckedChangeListener
+                AccPrefs.setOverlayEnabled(this@MainActivity, isChecked)
+                DramaAccessibilityService.instance?.refreshOverlayVisibility()
+            }
         }
         root.addView(overlaySwitch)
+
+        onlyInBiliSwitch = Switch(this).apply {
+            text = "仅在哔哩哔哩内显示悬浮窗（离开B站自动隐藏）"
+            isChecked = AccPrefs.isOnlyShowInBili(this@MainActivity)
+            setPadding(0, (6 * dp).toInt(), 0, (10 * dp).toInt())
+            setOnCheckedChangeListener { _, isChecked ->
+                AccPrefs.setOnlyShowInBili(this@MainActivity, isChecked)
+                DramaAccessibilityService.instance?.refreshOverlayVisibility()
+            }
+        }
+        root.addView(onlyInBiliSwitch)
 
         root.addView(TextView(this).apply { text = "跳转外部软件体验停留秒数（默认 11s）：" })
         externalStayInput = EditText(this).apply {
@@ -151,6 +191,7 @@ class MainActivity : AppCompatActivity() {
                     seekWait
                 )
                 AccPrefs.setOverlayEnabled(this@MainActivity, overlaySwitch.isChecked)
+                AccPrefs.setOnlyShowInBili(this@MainActivity, onlyInBiliSwitch.isChecked)
                 DramaAccessibilityService.instance?.refreshOverlayVisibility()
                 Toast.makeText(this@MainActivity, "已保存", Toast.LENGTH_SHORT).show()
             }
@@ -184,8 +225,20 @@ class MainActivity : AppCompatActivity() {
     private fun refreshStatusAndLogs() {
         val enabled = isAccessibilityEnabled()
         val running = DramaAccessibilityService.instance != null
-        statusView.text = "无障碍开关: ${if (enabled) "已开启" else "未开启"} | 服务实例: ${if (running) "已连接" else "未运行"}"
-        logView.text = DramaAccessibilityService.logs.takeLast(30).joinToString("\n").ifBlank { "暂无日志" }
+        val newStatus = "无障碍开关: ${if (enabled) "已开启" else "未开启"} | 服务实例: ${if (running) "已连接" else "未运行"}"
+        if (statusView.text.toString() != newStatus) {
+            statusView.text = newStatus
+        }
+        val newLogs = DramaAccessibilityService.logs.takeLast(30).joinToString("\n").ifBlank { "暂无日志" }
+        if (logView.text.toString() != newLogs) {
+            logView.text = newLogs
+        }
+        val overlayPref = AccPrefs.isOverlayEnabled(this)
+        if (overlaySwitch.isChecked != overlayPref) {
+            syncingOverlaySwitch = true
+            overlaySwitch.isChecked = overlayPref
+            syncingOverlaySwitch = false
+        }
     }
 
     private fun isAccessibilityEnabled(): Boolean {

@@ -22,7 +22,7 @@ sealed class EngineAction {
     ) : EngineAction()
     data class SwipeNextEpisode(val reason: String) : EngineAction()
     data class PressBack(val reason: String) : EngineAction()
-    data class BringBiliToFront(val reason: String) : EngineAction()
+    data class BringBiliToFront(val reason: String, val attempt: Int = 1) : EngineAction()
     data class Stop(val reason: String) : EngineAction()
 }
 
@@ -33,6 +33,10 @@ sealed class EngineAction {
 class DramaStateEngine(
     private var config: DramaConfig = DramaConfig()
 ) {
+    companion object {
+        const val MAX_RETURN_ATTEMPTS = 6
+    }
+
     var phase: EnginePhase = EnginePhase.IDLE
         private set
 
@@ -56,10 +60,12 @@ class DramaStateEngine(
     private var sameEpisodeUnlockAttempts: Int = 0
     private var sameEpisodeSwipeAttempts: Int = 0
     private var sameEpisodeUnpauseAttempts: Int = 0
+    private var returnToBiliAttempts: Int = 0
     private var lastUnlockEpisodeNum: Int = -1
     private var adClosingAtMs: Long = 0L
     private var lockedDramaTotal: Int? = null
     private var dramaContainerActivity: String = ""
+    private var lastBufferingAtMs: Long = 0L
 
     fun updateConfig(newConfig: DramaConfig) {
         config = newConfig
@@ -78,12 +84,14 @@ class DramaStateEngine(
         sameEpisodeUnlockAttempts = 0
         sameEpisodeSwipeAttempts = 0
         sameEpisodeUnpauseAttempts = 0
+        returnToBiliAttempts = 0
         lastUnlockEpisodeNum = -1
         adClosingAtMs = 0L
         adsCompletedCount = 0
         lastEpisode = null
         lockedDramaTotal = null
         dramaContainerActivity = ""
+        lastBufferingAtMs = 0L
     }
 
     fun stop() {
@@ -102,12 +110,36 @@ class DramaStateEngine(
             return handleOutsideBilibili(snapshot, now)
         }
 
-        // 2. Inside Bilibili: Reward Ad screen
+        // 4. Inside Bilibili: Reward Ad screen
         if (RuleMatcher.isRewardAdScreen(snapshot)) {
             return handleRewardAdScreen(snapshot, now)
         }
 
-        // 3. Inside Bilibili: Short-drama container screen
+        // 4.5 Inside Bilibili: Handle in-app "即将离开哔哩哔哩" dialog even before RewardAdActivity attaches
+        if (RuleMatcher.isJumpConfirmationDialog(snapshot)) {
+            val shouldBlock = RuleMatcher.isDownloadOrInstallPrompt(snapshot) ||
+                phase == EnginePhase.RETURNING_TO_BILI ||
+                (config.interceptExternalJumps && !externalJumpTriggeredForAd)
+            if (shouldBlock) {
+                RuleMatcher.findSystemJumpDeny(snapshot)?.let { denyNode ->
+                    if (now - lastActionAtMs > 700L) {
+                        lastActionAtMs = now
+                        return EngineAction.ClickNode(denyNode, "拒绝站内跳出弹窗: ${denyNode.displayLabel}")
+                    }
+                    return EngineAction.Wait(350L, "关闭跳出弹窗")
+                }
+            } else {
+                RuleMatcher.findSystemJumpConfirm(snapshot)?.let { confirmNode ->
+                    if (now - lastActionAtMs > 700L) {
+                        lastActionAtMs = now
+                        return EngineAction.ClickNode(confirmNode, "确认站内体验跳转: ${confirmNode.displayLabel}")
+                    }
+                    return EngineAction.Wait(350L, "确认跳转体验")
+                }
+            }
+        }
+
+        // 5. Inside Bilibili: Short-drama container screen
         if (RuleMatcher.isShortDramaScreen(snapshot)) {
             return handleShortDramaScreen(snapshot, now)
         }
@@ -121,41 +153,49 @@ class DramaStateEngine(
         val expectingAdTransition = phase == EnginePhase.WAITING_AD_START ||
             phase == EnginePhase.WATCHING_AD ||
             phase == EnginePhase.EXTERNAL_APP_STAY ||
+            phase == EnginePhase.RETURNING_TO_BILI ||
             externalJumpTriggeredForAd
 
-        // Always reject app store / APK installer redirects immediately
-        if (pkg in BiliNodes.APP_STORE_AND_INSTALLER_PACKAGES) {
-            if (now - lastActionAtMs > 800L) {
-                lastActionAtMs = now
-                return EngineAction.BringBiliToFront("拦截应用商店/安装器($pkg)，立即返回")
-            }
-            return EngineAction.Wait(450L, "正在退回B站...")
-        }
-
-        // Handle system "是否允许打开外部应用 / 下载安装" confirmation dialogs
-        if (expectingAdTransition) {
+        // 1. Handle system / OEM "是否允许打开外部应用 / 下载安装" confirmation dialogs first
+        if (expectingAdTransition && RuleMatcher.isJumpConfirmationDialog(snapshot)) {
             val shouldBlockDialog = RuleMatcher.isDownloadOrInstallPrompt(snapshot) ||
+                phase == EnginePhase.RETURNING_TO_BILI ||
                 (config.interceptExternalJumps && !externalJumpTriggeredForAd)
             if (shouldBlockDialog) {
                 RuleMatcher.findSystemJumpDeny(snapshot)?.let { denyNode ->
-                    if (now - lastActionAtMs > 800L) {
+                    if (now - lastActionAtMs > 700L) {
                         lastActionAtMs = now
                         return EngineAction.ClickNode(denyNode, "拦截自动跳转/下载弹窗: ${denyNode.displayLabel}")
                     }
-                    return EngineAction.Wait(450L, "关闭自动跳转弹窗")
+                    return EngineAction.Wait(400L, "关闭自动跳转弹窗")
                 }
             } else {
                 RuleMatcher.findSystemJumpConfirm(snapshot)?.let { confirmNode ->
-                    if (now - lastActionAtMs > 900L) {
+                    if (now - lastActionAtMs > 750L) {
                         lastActionAtMs = now
                         return EngineAction.ClickNode(confirmNode, "确认体验跳转弹窗: ${confirmNode.displayLabel}")
                     }
-                    return EngineAction.Wait(500L, "等待系统跳转确认")
+                    return EngineAction.Wait(450L, "等待系统跳转确认")
                 }
             }
         }
 
-        // If we intentionally triggered an external experience task, wait the configured stay seconds
+        // 2. Always reject app store / APK installer redirects immediately
+        if (pkg in BiliNodes.APP_STORE_AND_INSTALLER_PACKAGES) {
+            phase = EnginePhase.RETURNING_TO_BILI
+            externalJumpTriggeredForAd = false
+            if (now - lastActionAtMs > 850L) {
+                returnToBiliAttempts = (returnToBiliAttempts + 1).coerceAtMost(MAX_RETURN_ATTEMPTS)
+                lastActionAtMs = now
+                return EngineAction.BringBiliToFront(
+                    reason = "拦截应用商店/安装器($pkg)，立即返回(第${returnToBiliAttempts}次)",
+                    attempt = returnToBiliAttempts
+                )
+            }
+            return EngineAction.Wait(400L, "正在退回B站...")
+        }
+
+        // 3. If we intentionally triggered an external experience task, wait the configured stay seconds
         if (phase == EnginePhase.EXTERNAL_APP_STAY || externalJumpTriggeredForAd) {
             if (phase != EnginePhase.EXTERNAL_APP_STAY || externalEnteredAtMs == 0L) {
                 phase = EnginePhase.EXTERNAL_APP_STAY
@@ -170,11 +210,39 @@ class DramaStateEngine(
             }
             phase = EnginePhase.RETURNING_TO_BILI
             externalJumpTriggeredForAd = false
+            returnToBiliAttempts = 1
             lastActionAtMs = now
-            return EngineAction.BringBiliToFront("外部体验满 ${config.externalStaySeconds}s，返回B站领奖")
+            return EngineAction.BringBiliToFront(
+                reason = "外部体验满 ${config.externalStaySeconds}s，返回B站领奖",
+                attempt = 1
+            )
         }
 
-        // Never fight user returning to Launcher / System / Plugin UI
+        // 4. Active multi-attempt escalation to return to Bilibili (Checked BEFORE pause-package guard
+        //    so transient Back -> Launcher or multi-screen third-party apps never stall pull-back!)
+        if (phase == EnginePhase.RETURNING_TO_BILI) {
+            if (returnToBiliAttempts < MAX_RETURN_ATTEMPTS) {
+                RuleMatcher.findReturnToBiliButton(snapshot)?.let { returnNode ->
+                    if (now - lastActionAtMs > 800L) {
+                        lastActionAtMs = now
+                        return EngineAction.ClickNode(returnNode, "点击返回B站按钮: ${returnNode.displayLabel}")
+                    }
+                    return EngineAction.Wait(350L, "正在返回B站...")
+                }
+                if (now - lastActionAtMs > 1100L) {
+                    returnToBiliAttempts += 1
+                    lastActionAtMs = now
+                    return EngineAction.BringBiliToFront(
+                        reason = "正在拉回B站(第${returnToBiliAttempts}次尝试)",
+                        attempt = returnToBiliAttempts
+                    )
+                }
+                return EngineAction.Wait(350L, "正在返回B站...")
+            }
+            return EngineAction.Wait(1000L, "未能自动拉回B站($pkg)，请手动切回B站")
+        }
+
+        // 5. Never fight user returning to Launcher / System / Plugin UI when idle/not returning
         val isPausePkg = pkg in BiliNodes.NON_AD_PAUSE_PACKAGES ||
             pkg.contains("launcher") ||
             pkg.endsWith(".home")
@@ -182,20 +250,49 @@ class DramaStateEngine(
             return EngineAction.Wait(900L, "已切出B站($pkg)，暂停等待返回")
         }
 
-        // Unsolicited automatic jump out during an ad (e.g. shake/auto-redirect): pull back immediately so timer resumes
+        // 6. Unsolicited automatic jump out during an ad (e.g. shake/auto-redirect): pull back immediately so timer resumes
         val pullInterval = if (config.interceptExternalJumps) 800L else 1200L
         if (now - lastActionAtMs > pullInterval) {
+            phase = EnginePhase.RETURNING_TO_BILI
+            returnToBiliAttempts = 1
             lastActionAtMs = now
-            return EngineAction.BringBiliToFront("拦截自动跳出($pkg)，立即拉回继续计时")
+            return EngineAction.BringBiliToFront(
+                reason = "拦截自动跳出($pkg)，立即拉回继续计时",
+                attempt = 1
+            )
         }
         return EngineAction.Wait(450L, "正在返回B站继续广告计时...")
     }
 
     private fun handleRewardAdScreen(snapshot: UiSnapshot, now: Long): EngineAction {
+        returnToBiliAttempts = 0
         if (phase != EnginePhase.WATCHING_AD) {
             phase = EnginePhase.WATCHING_AD
             adEnteredAtMs = now
             adClosingAtMs = 0L
+        }
+
+        // Handle Bilibili's own in-app jump confirmation dialog ("即将离开哔哩哔哩")
+        if (RuleMatcher.isJumpConfirmationDialog(snapshot)) {
+            val shouldBlock = RuleMatcher.isDownloadOrInstallPrompt(snapshot) ||
+                (config.interceptExternalJumps && !externalJumpTriggeredForAd)
+            if (shouldBlock) {
+                RuleMatcher.findSystemJumpDeny(snapshot)?.let { denyNode ->
+                    if (now - lastActionAtMs > 700L) {
+                        lastActionAtMs = now
+                        return EngineAction.ClickNode(denyNode, "拒绝站内跳出弹窗: ${denyNode.displayLabel}")
+                    }
+                    return EngineAction.Wait(350L, "关闭跳出弹窗")
+                }
+            } else {
+                RuleMatcher.findSystemJumpConfirm(snapshot)?.let { confirmNode ->
+                    if (now - lastActionAtMs > 700L) {
+                        lastActionAtMs = now
+                        return EngineAction.ClickNode(confirmNode, "确认站内体验跳转: ${confirmNode.displayLabel}")
+                    }
+                    return EngineAction.Wait(350L, "确认跳转体验")
+                }
+            }
         }
 
         // Guard against infinite wait in a broken ad
@@ -261,6 +358,7 @@ class DramaStateEngine(
     }
 
     private fun handleShortDramaScreen(snapshot: UiSnapshot, now: Long): EngineAction {
+        returnToBiliAttempts = 0
         val rawEp = EpisodeParser.parse(snapshot)
 
         // Lock onto the user's target drama total episode count on initial entry
@@ -313,6 +411,7 @@ class DramaStateEngine(
             sameEpisodeSwipeAttempts = 0
             sameEpisodeUnpauseAttempts = 0
             externalJumpTriggeredForAd = false
+            lastBufferingAtMs = 0L
         } else if (ep != null) {
             lastEpisode = ep
         }
@@ -400,8 +499,9 @@ class DramaStateEngine(
         val elapsedInEp = now - episodeEnteredAtMs
 
         // 2.9 Wait briefly if player is visibly buffering so seekbar drag hits an active player (state >= 3)
-        if (RuleMatcher.isEpisodeBuffering(snapshot) && elapsedInEp < 2400L) {
-            return EngineAction.Wait(220L, "${lastEpisode ?: "当前集"} 等待缓冲...")
+        if (RuleMatcher.isEpisodeBuffering(snapshot) && elapsedInEp < 5200L) {
+            lastBufferingAtMs = now
+            return EngineAction.Wait(250L, "${lastEpisode ?: "当前集"} 等待缓冲...")
         }
 
         // 3. Fast single-stage seek probe (or optional 2-stage) to trigger preview/pause-point locks immediately
@@ -413,6 +513,7 @@ class DramaStateEngine(
                 }
                 seekStage = 1
                 episodeEnteredAtMs = now
+                lastBufferingAtMs = 0L
                 return EngineAction.SeekRatio(
                     seekBar = seekBar,
                     ratio = config.primarySeekRatio,
@@ -421,7 +522,9 @@ class DramaStateEngine(
                 )
             }
             if (seekStage == 1) {
-                if (elapsedInEp < config.postSeekWaitMs) {
+                if (elapsedInEp < config.postSeekWaitMs ||
+                    (lastBufferingAtMs > 0L && now - lastBufferingAtMs < config.postSeekWaitMs)
+                ) {
                     return EngineAction.Wait(220L, "${lastEpisode ?: "当前集"} 检测锁集...")
                 }
                 if (config.secondarySeekEnabled) {
@@ -519,6 +622,25 @@ class DramaStateEngine(
         if (phase == EnginePhase.WAITING_AD_START && now - lastActionAtMs < 3500L) {
             return EngineAction.Wait(500L, "页面跳转中...")
         }
+
+        // If we returned to Bilibili's main activity after launcher fallback instead of AppContainer/RewardAd,
+        // try switching back to the drama task window once before falling back to PressBack
+        if (phase == EnginePhase.RETURNING_TO_BILI &&
+            snapshot.activityName.contains("MainActivity") &&
+            dramaContainerActivity.isNotBlank() &&
+            returnToBiliAttempts < MAX_RETURN_ATTEMPTS
+        ) {
+            if (now - lastActionAtMs > 1000L) {
+                returnToBiliAttempts += 1
+                lastActionAtMs = now
+                return EngineAction.BringBiliToFront(
+                    reason = "尝试切回短剧任务窗口(第${returnToBiliAttempts}次)",
+                    attempt = returnToBiliAttempts
+                )
+            }
+            return EngineAction.Wait(400L, "等待切回短剧窗口...")
+        }
+
         val backDelay = if (config.interceptExternalJumps && phase == EnginePhase.WATCHING_AD) 900L else 1800L
         if (now - lastActionAtMs > backDelay) {
             lastActionAtMs = now

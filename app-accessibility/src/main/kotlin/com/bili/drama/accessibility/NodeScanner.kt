@@ -2,6 +2,8 @@ package com.bili.drama.accessibility
 
 import android.graphics.Rect
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
+import com.bili.drama.core.BiliNodes
 import com.bili.drama.core.RectBounds
 import com.bili.drama.core.UiNode
 import com.bili.drama.core.UiSnapshot
@@ -12,13 +14,16 @@ import com.bili.drama.core.UiSnapshot
  */
 object NodeScanner {
 
+    private const val SELF_PKG = "com.bili.drama.accessibility"
+    private const val SYSTEM_UI_PKG = "com.android.systemui"
+
     data class ScanResult(
         val snapshot: UiSnapshot,
         val nodeRefs: Map<String, AccessibilityNodeInfo>
     )
 
     fun capture(
-        windows: List<android.view.accessibility.AccessibilityWindowInfo>,
+        windows: List<AccessibilityWindowInfo>,
         activeRoot: AccessibilityNodeInfo?,
         screenWidth: Int,
         screenHeight: Int,
@@ -26,30 +31,66 @@ object NodeScanner {
     ): ScanResult {
         val uiNodes = mutableListOf<UiNode>()
         val nodeRefs = HashMap<String, AccessibilityNodeInfo>()
-        var pkg = activeRoot?.packageName?.toString().orEmpty()
         var seq = 0
 
-        val roots = mutableListOf<AccessibilityNodeInfo>()
-        if (activeRoot != null) {
-            roots.add(activeRoot)
+        // Sort windows by focus -> active -> layer so top foreground window/dialog determines pkg accurately
+        val candidateWins = windows.asSequence()
+            .filter {
+                it.type != AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY &&
+                    it.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD
+            }
+            .mapNotNull { win ->
+                val r = win.root ?: return@mapNotNull null
+                val rPkg = r.packageName?.toString().orEmpty()
+                if (rPkg == SELF_PKG) return@mapNotNull null
+                Triple(win, r, rPkg)
+            }
+            .sortedWith(
+                compareByDescending<Triple<AccessibilityWindowInfo, AccessibilityNodeInfo, String>> { it.first.isFocused }
+                    .thenByDescending { it.first.isActive }
+                    .thenByDescending { it.first.layer }
+            )
+            .toList()
+
+        // Prefer active system/OEM dialog package if it matches SYSTEM_CONFIRM_PACKAGES,
+        // else topmost TYPE_APPLICATION window, avoiding transient systemui/self override.
+        var pkg = candidateWins.firstOrNull { (win, _, rPkg) ->
+            rPkg in BiliNodes.SYSTEM_CONFIRM_PACKAGES && (win.isFocused || win.isActive)
+        }?.third.orEmpty()
+
+        if (pkg.isBlank()) {
+            pkg = candidateWins.firstOrNull { (win, _, rPkg) ->
+                rPkg.isNotBlank() &&
+                    rPkg != SYSTEM_UI_PKG &&
+                    win.type == AccessibilityWindowInfo.TYPE_APPLICATION
+            }?.third.orEmpty()
         }
-        for (win in windows) {
-            if (win.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) {
-                continue
+
+        if (pkg.isBlank()) {
+            val activePkg = activeRoot?.packageName?.toString().orEmpty()
+            pkg = when {
+                activePkg.isNotBlank() && activePkg != SELF_PKG && activePkg != SYSTEM_UI_PKG -> activePkg
+                else -> candidateWins.firstOrNull { it.third.isNotBlank() }?.third.orEmpty().ifBlank { activePkg }
             }
-            val r = win.root ?: continue
-            if (r != activeRoot) {
-                roots.add(r)
+        }
+
+        val roots = mutableListOf<AccessibilityNodeInfo>()
+        for ((_, root, rootPkg) in candidateWins) {
+            if (rootPkg == SYSTEM_UI_PKG || rootPkg == SELF_PKG) continue
+            if (roots.none { it == root }) {
+                roots.add(root)
             }
+        }
+        val activePkg = activeRoot?.packageName?.toString().orEmpty()
+        if (activeRoot != null &&
+            activePkg != SELF_PKG &&
+            activePkg != SYSTEM_UI_PKG &&
+            roots.none { it == activeRoot }
+        ) {
+            roots.add(0, activeRoot)
         }
 
         for (root in roots) {
-            val rootPkg = root.packageName?.toString().orEmpty()
-            if (pkg.isBlank() && rootPkg.isNotBlank() && rootPkg != "com.android.systemui") {
-                pkg = rootPkg
-            }
-            // Skip scanning our own overlay and systemui notification banners
-            if (rootPkg == "com.bili.drama.accessibility" || rootPkg == "com.android.systemui") continue
             traverse(root, uiNodes, nodeRefs, screenWidth, screenHeight) {
                 seq += 1
                 "n_$seq"

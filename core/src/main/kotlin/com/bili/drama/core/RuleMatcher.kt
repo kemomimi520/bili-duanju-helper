@@ -17,8 +17,11 @@ object RuleMatcher {
         if (snapshot.packageName != BiliNodes.PKG_BILI) return false
         return snapshot.firstById(BiliNodes.ID_FEED_VIDEOS) != null ||
             snapshot.firstById(BiliNodes.ID_ALBUM_SELECT_TEXT) != null ||
+            snapshot.firstById(BiliNodes.ID_ALBUM_SELECT_LAYOUT) != null ||
             snapshot.firstLaidOutOnScreenById(BiliNodes.ID_CTRL_SEEKBAR) != null ||
-            hasVisibleLockOverlay(snapshot)
+            hasVisibleLockOverlay(snapshot) ||
+            (snapshot.activityName.contains("AppContainerActivity") &&
+                snapshot.allTexts().any { it.contains("选集(") })
     }
 
     fun isShortDramaScreen(snapshot: UiSnapshot): Boolean =
@@ -240,29 +243,46 @@ object RuleMatcher {
         return AdClassification.Waiting(status)
     }
 
+    fun isJumpConfirmationDialog(snapshot: UiSnapshot): Boolean {
+        if (snapshot.packageName in BiliNodes.SYSTEM_CONFIRM_PACKAGES) return true
+        val compact = snapshot.allTexts().joinToString("")
+        return BiliNodes.JUMP_CONFIRM_DIALOG_HINTS.any { compact.contains(it) }
+    }
+
     fun findSystemJumpConfirm(snapshot: UiSnapshot): UiNode? {
-        if (snapshot.packageName !in BiliNodes.SYSTEM_CONFIRM_PACKAGES) return null
-        return snapshot.nodes.firstOrNull { node ->
-            node.visible &&
-                node.enabled &&
-                node.bounds.isValid &&
-                BiliNodes.SYSTEM_ALLOW_BUTTON_TEXTS.any { kw ->
-                    node.displayLabel == kw || node.displayLabel.startsWith(kw)
-                }
+        if (!isJumpConfirmationDialog(snapshot)) return null
+        val valid = snapshot.nodes.filter {
+            it.visible && it.enabled &&
+                (it.bounds.isOnScreen(snapshot.screenWidth, snapshot.screenHeight) || it.bounds.isValid)
+        }
+        return valid.firstOrNull { node ->
+            BiliNodes.SYSTEM_ALLOW_BUTTON_TEXTS.any { kw -> node.displayLabel == kw }
+        } ?: valid.firstOrNull { node ->
+            BiliNodes.SYSTEM_ALLOW_BUTTON_TEXTS.any { kw -> node.displayLabel.startsWith(kw) }
         }
     }
 
     fun findSystemJumpDeny(snapshot: UiSnapshot): UiNode? {
-        if (snapshot.packageName !in BiliNodes.SYSTEM_CONFIRM_PACKAGES) return null
-        return snapshot.nodes.firstOrNull { node ->
-            node.visible &&
-                node.enabled &&
-                node.bounds.isValid &&
-                BiliNodes.SYSTEM_DENY_BUTTON_TEXTS.any { kw ->
-                    node.displayLabel == kw || node.displayLabel.startsWith(kw)
-                }
+        if (!isJumpConfirmationDialog(snapshot)) return null
+        val valid = snapshot.nodes.filter {
+            it.visible && it.enabled &&
+                (it.bounds.isOnScreen(snapshot.screenWidth, snapshot.screenHeight) || it.bounds.isValid)
+        }
+        return valid.firstOrNull { node ->
+            BiliNodes.SYSTEM_DENY_BUTTON_TEXTS.any { kw -> node.displayLabel == kw }
+        } ?: valid.firstOrNull { node ->
+            BiliNodes.SYSTEM_DENY_BUTTON_TEXTS.any { kw -> node.displayLabel.startsWith(kw) }
         }
     }
+
+    fun findReturnToBiliButton(snapshot: UiSnapshot): UiNode? =
+        snapshot.nodes.firstOrNull { node ->
+            val label = node.displayLabel
+            node.visible &&
+                node.enabled &&
+                node.bounds.isOnScreen(snapshot.screenWidth, snapshot.screenHeight) &&
+                BiliNodes.RETURN_TO_BILI_TEXTS.any { label == it || label.contains(it) }
+        }
 
     fun isDownloadOrInstallPrompt(snapshot: UiSnapshot): Boolean {
         val compact = snapshot.allTexts().joinToString("")
